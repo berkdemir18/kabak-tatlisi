@@ -64,6 +64,12 @@ const authed = (req) => {
 const isHttps = (req) => req.headers['x-forwarded-proto'] === 'https' || !!req.socket.encrypted
 const authCookie = (req) => `bst=${AUTH}; Max-Age=${COOKIE_AGE}; Path=/; HttpOnly; SameSite=Lax${isHttps(req) ? '; Secure' : ''}`
 const fails = new Map()
+// Kapı (Render) ile ev sunucusu (PC) arasındaki ortak anahtar: ikisinde de aynı kullanıcı adı + şifre.
+const SSO_KEY = crypto.createHash('sha256').update('sso1:' + USERNAME + ':' + PASSWORD).digest()
+const sso = (msg) => crypto.createHmac('sha256', SSO_KEY).update(msg).digest('base64url')
+const safeEq = (a, b) => { const x = Buffer.from(String(a || '')), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y) }
+let HOME = null
+module.exports = { sso }
 
 // ---------------------------------------------------------------- yardimcilar
 
@@ -400,6 +406,18 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/logout') return send(req, res, 302, '', 'text/plain', { 'set-cookie': 'bst=; Max-Age=0; Path=/', location: '/' })
     if (u.pathname === '/robots.txt') return send(req, res, 200, 'User-agent: *\nDisallow: /\n', 'text/plain')
     if (u.pathname === '/healthz') return send(req, res, 200, 'ok', 'text/plain')
+    // Ev sunucusu (PC, Türkiye IP'si) kendini kapıya (Render) kaydeder; kapı girişliyi oraya geçirir.
+    if (u.pathname === '/api/home-register' && req.method === 'POST') {
+      const { url, ts, sig } = await body(req)
+      if (!/^https:\/\/[a-z0-9.-]+$/i.test(url || '') || Math.abs(Date.now() - ts) > 5 * 60e3 || !safeEq(sig, sso(`home|${url}|${ts}`))) return send(req, res, 403, { ok: false })
+      HOME = { url, at: Date.now() }
+      return json(req, res, { ok: true })
+    }
+    if (u.pathname === '/sso') {
+      const exp = +u.searchParams.get('exp')
+      if (exp > Date.now() && exp < Date.now() + 5 * 60e3 && safeEq(u.searchParams.get('t'), sso(`sso|${exp}`))) return send(req, res, 302, '', 'text/plain', { 'set-cookie': authCookie(req), location: '/' })
+      return send(req, res, 302, '', 'text/plain', { location: '/' })
+    }
     if (!authed(req)) {
       if (u.pathname.startsWith('/api/') || u.pathname === '/s' || u.pathname === '/sub') return send(req, res, 401, { error: 'giriş' })
       return serveStatic(req, res, 'login.html')
@@ -408,6 +426,10 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/sub') return await handleSub(req, res, u.searchParams)
     if (u.pathname.startsWith('/api/')) return await api(req, res, u)
     if (u.pathname === '/' || u.pathname === '/index.html') {
+      if (HOME && Date.now() - HOME.at < 10 * 60e3 && !u.searchParams.has('burada')) {
+        const exp = Date.now() + 2 * 60e3
+        return send(req, res, 302, '', 'text/plain', { location: `${HOME.url}/sso?exp=${exp}&t=${sso(`sso|${exp}`)}` })
+      }
       // Her girişte çerez tazelenir: cihaz hiç çıkış yapmadıkça hep hatırlanır.
       res.setHeader('set-cookie', authCookie(req))
       return serveStatic(req, res, 'index.html')

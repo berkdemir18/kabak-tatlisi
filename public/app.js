@@ -193,6 +193,16 @@ async function renderGroups() {
 const titleCase = (s) => s.toLocaleLowerCase('tr').replace(/(^|[\s•(])(\p{L})/gu, (m, a, b) => a + b.toLocaleUpperCase('tr')).replace(/\bTv\b/g, 'TV').replace(/\bHbo\b/, 'HBO').replace(/İlk 10/i, 'İlk 10')
 
 async function selectGroup(g, initial) {
+  try {
+    await selectGroupInner(g, initial)
+  } catch (e) {
+    if (!g || g.isList) return
+    $('#listHead').replaceChildren(h('h2', {}, g.title))
+    $('#vspace').style.height = '0px'
+    $('#vspace').replaceChildren(h('div', { class: 'empty' }, 'Yüklenemedi.', h('br'), h('button', { class: 'btn', style: { marginTop: '16px' }, onclick: () => selectGroup(g) }, '↻  Tekrar dene')))
+  }
+}
+async function selectGroupInner(g, initial) {
   if (!g) return
   if (g.isList) {
     LS.set('iptvList', g.key.slice(5))
@@ -202,6 +212,11 @@ async function selectGroup(g, initial) {
   LS.set('group', S.group)
   for (const b of $('#groups').querySelectorAll('.g')) if (!b.dataset.key?.startsWith('list:')) b.classList.toggle('on', b.dataset.key === g.key)
   const k = g.key
+  if (!initial && !['search', 'searchTv'].includes(k)) {
+    $('#listHead').replaceChildren(h('h2', {}, g.title))
+    $('#vspace').style.height = '0px'
+    $('#vspace').replaceChildren(h('div', { class: 'spin' }))
+  }
   if (k === 'cont') {
     const items = Object.entries(S.store.progress).filter(([, p]) => p.meta && p.dur && p.pos / p.dur < 0.95).sort((a, b) => b[1].updatedAt - a[1].updatedAt).map(([key, p]) => ({ ...p.meta, _prog: p, _key: key }))
     return showList('meta', g.title, items, { initial })
