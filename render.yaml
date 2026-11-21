@@ -6,7 +6,7 @@ services:
     region: frankfurt
     buildCommand: npm ci --omit=dev
     startCommand: node server/index.cjs
-    healthCheckPath: /manifest.json
+    healthCheckPath: /healthz
     envVars:
       - key: NODE_VERSION
         value: "22"

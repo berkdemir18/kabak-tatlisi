@@ -398,7 +398,8 @@ const server = http.createServer(async (req, res) => {
       return json(req, res, { ok: false, error: 'Kullanıcı adı ya da şifre yanlış' })
     }
     if (u.pathname === '/logout') return send(req, res, 302, '', 'text/plain', { 'set-cookie': 'bst=; Max-Age=0; Path=/', location: '/' })
-    if (['/manifest.json', '/icon.png', '/login.css'].includes(u.pathname)) return serveStatic(req, res, u.pathname)
+    if (u.pathname === '/robots.txt') return send(req, res, 200, 'User-agent: *\nDisallow: /\n', 'text/plain')
+    if (u.pathname === '/healthz') return send(req, res, 200, 'ok', 'text/plain')
     if (!authed(req)) {
       if (u.pathname.startsWith('/api/') || u.pathname === '/s' || u.pathname === '/sub') return send(req, res, 401, { error: 'giriş' })
       return serveStatic(req, res, 'login.html')
