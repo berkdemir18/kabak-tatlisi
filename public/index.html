@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#08090b" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" href="/icon.png" />
+<title>BerkStream N</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <button class="brand" id="brand"><b>B</b><span>BerkStream <i>N</i></span></button>
+    <nav class="tabs" id="tabs"></nav>
+    <div class="clock" id="clock"></div>
+  </header>
+  <main class="cols">
+    <aside class="groups" id="groups"></aside>
+    <section class="list" id="listCol">
+      <div class="listHead" id="listHead"></div>
+      <div class="vlist" id="vlist"><div class="vspace" id="vspace"></div></div>
+    </section>
+    <section class="preview" id="preview"></section>
+  </main>
+</div>
+
+<div class="player" id="player" hidden>
+  <div class="stage" id="stage"></div>
+  <div class="pTop" id="pTop">
+    <button class="pBtn" id="pClose" aria-label="Kapat">✕</button>
+    <div class="pTitle"><b id="pTitle"></b><span id="pSub"></span></div>
+    <div class="pClock" id="pClock"></div>
+  </div>
+  <div class="pCenter" id="pCenter"></div>
+  <div class="pBottom" id="pBottom">
+    <div class="seek" id="seekWrap"><span id="tCur">0:00</span><div class="bar" id="bar"><div class="buf" id="barBuf"></div><div class="fill" id="barFill"></div><div class="knob" id="barKnob"></div></div><span id="tDur">0:00</span></div>
+    <div class="pCtrls" id="pCtrls"></div>
+  </div>
+  <div class="sheet" id="sheet" hidden></div>
+  <div class="toast" id="toast" hidden></div>
+</div>
+
+<div class="modal" id="modal" hidden></div>
+<script src="/hls.min.js"></script>
+<script src="/mpegts.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

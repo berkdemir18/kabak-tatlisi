@@ -1,0 +1,21 @@
+{
+  "name": "berkstream-n-tesla",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BerkStream N Tesla - web",
+  "author": "Mustafa Berk Demir",
+  "main": "server/index.cjs",
+  "scripts": {
+    "start": "node server/index.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "crypto-js": "^4.2.0"
+  },
+  "devDependencies": {
+    "mpegts.js": "^1.8.0"
+  }
+}

@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: kabak-tatlisi
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm ci --omit=dev
+    startCommand: node server/index.cjs
+    healthCheckPath: /manifest.json
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: BS_USER
+        sync: false
+      - key: BS_PASSWORD
+        sync: false
+      - key: TMDB_API_KEY
+        sync: false
+      - key: BS_SECRET
+        generateValue: true
+      - key: BS_PARALLEL
+        value: "6"
+      - key: BS_WORKER_MB
+        value: "160"
