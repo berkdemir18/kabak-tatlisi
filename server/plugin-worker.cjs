@@ -9,7 +9,8 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const MAX_BYTES = 4 * 1024 * 1024
 const nativeFetch = globalThis.fetch
 
-const { code, scraperId, tmdbKey, settings, args } = workerData
+// Havuz modu: iş parçacığı bir kez açılır (cheerio bir kez yüklenir), eklentiler sırayla koşar.
+const { tmdbKey } = workerData
 
 function pluginFetch(input, init = {}) {
   const headers = new Headers(init.headers || (input && input.headers) || {})
@@ -59,7 +60,7 @@ const sandboxRequire = (name) => {
   throw new Error(`Module '${name}' is not available`)
 }
 
-const logs = []
+let logs = []
 const log = (level) => (...a) => {
   if (logs.length < 40) logs.push(`[${level}] ` + a.map((x) => (typeof x === 'string' ? x : safe(x))).join(' ').slice(0, 300))
 }
@@ -75,8 +76,7 @@ globalThis.fetch = pluginFetch
 globalThis.CryptoJS = CryptoJS
 globalThis.cheerio = cheerio
 globalThis.TMDB_API_KEY = tmdbKey
-globalThis.SCRAPER_ID = scraperId
-globalThis.SCRAPER_SETTINGS = settings || {}
+globalThis.SCRAPER_SETTINGS = {}
 globalThis.window = globalThis
 globalThis.self = globalThis
 globalThis.global = globalThis
@@ -102,7 +102,9 @@ const sandboxGlobal = new Proxy(globalThis, {
   has: (t, k) => (k === 'process' || k === 'require' ? false : Reflect.has(t, k)),
 })
 
-async function run() {
+async function run({ code, scraperId, args }) {
+  globalThis.SCRAPER_ID = scraperId
+  try { delete globalThis.getStreams } catch {}
   const module = { exports: {} }
   // eslint-disable-next-line no-new-func
   const fn = new Function('module', 'exports', 'require', 'process', '__dirname', '__filename', 'console', 'globalThis', code)
@@ -113,6 +115,10 @@ async function run() {
   return JSON.parse(JSON.stringify(Array.isArray(result) ? result : []))
 }
 
-run()
-  .then((streams) => parentPort.postMessage({ ok: true, streams, logs }))
-  .catch((e) => parentPort.postMessage({ ok: false, error: String((e && e.message) || e), logs }))
+parentPort.on('message', (job) => {
+  logs = []
+  run(job)
+    .then((streams) => parentPort.postMessage({ id: job.id, ok: true, streams, logs }))
+    .catch((e) => parentPort.postMessage({ id: job.id, ok: false, error: String((e && e.message) || e), logs }))
+})
+parentPort.postMessage({ ready: true })

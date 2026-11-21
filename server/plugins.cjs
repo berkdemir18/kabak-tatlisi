@@ -132,24 +132,58 @@ async function runOne(scraper, args) {
       return { ok: false, error: 'dosya yok' }
     }
   }
-  return new Promise((resolve) => {
-    const worker = new Worker(path.join(__dirname, 'plugin-worker.cjs'), {
-      workerData: { code, scraperId: scraper.id, tmdbKey, settings: {}, args },
-      resourceLimits: { maxOldGenerationSizeMb: +(process.env.BS_WORKER_MB || 256) },
+  return pool.run({ code, scraperId: scraper.id, args })
+}
+
+// İş parçacığı havuzu: her eklentide yeni iş parçacığı + cheerio yüklemek zayıf işlemcide (Render)
+// dakikalar sürüyordu. Havuzdakiler açık kalır; zaman aşımına uğrayan iş parçacığı öldürülüp yenisi açılır.
+let jobSeq = 0
+const pool = {
+  workers: [],
+  queue: [],
+  spawn() {
+    const w = new Worker(path.join(__dirname, 'plugin-worker.cjs'), { workerData: { tmdbKey }, resourceLimits: { maxOldGenerationSizeMb: +(process.env.BS_WORKER_MB || 256) } })
+    const slot = { w, busy: null, ready: false }
+    w.on('message', (m) => {
+      if (m.ready) { slot.ready = true; return this.pump() }
+      if (slot.busy && m.id === slot.busy.id) {
+        const job = slot.busy
+        slot.busy = null
+        clearTimeout(job.timer)
+        job.resolve(m)
+        this.pump()
+      }
     })
-    let done = false
-    const finish = (v) => {
-      if (done) return
-      done = true
-      clearTimeout(timer)
-      worker.terminate().catch(() => {})
-      resolve(v)
+    const dead = () => {
+      this.workers = this.workers.filter((x) => x !== slot)
+      if (slot.busy) { clearTimeout(slot.busy.timer); slot.busy.resolve({ ok: false, error: 'çıktı' }); slot.busy = null }
+      this.pump()
     }
-    const timer = setTimeout(() => finish({ ok: false, error: 'zaman aşımı' }), PLUGIN_TIMEOUT_MS)
-    worker.once('message', finish)
-    worker.once('error', (e) => finish({ ok: false, error: String(e?.message || e) }))
-    worker.once('exit', () => finish({ ok: false, error: 'çıktı' }))
-  })
+    w.on('error', dead)
+    w.on('exit', dead)
+    this.workers.push(slot)
+    return slot
+  },
+  run(payload) {
+    return new Promise((resolve) => {
+      this.queue.push({ id: ++jobSeq, payload, resolve })
+      this.pump()
+    })
+  },
+  pump() {
+    while (this.workers.length < PARALLEL && this.queue.length > this.workers.filter((x) => !x.busy).length) this.spawn()
+    for (const slot of this.workers) {
+      if (!this.queue.length) break
+      if (slot.busy || !slot.ready) continue
+      const job = this.queue.shift()
+      slot.busy = job
+      job.timer = setTimeout(() => {
+        // Takılan eklenti: iş parçacığını öldür (kalan fetch'leri de gider), yenisi açılır.
+        if (slot.busy === job) { slot.busy = null; job.resolve({ ok: false, error: 'zaman aşımı' }); slot.w.terminate().catch(() => {}) }
+      }, PLUGIN_TIMEOUT_MS)
+      slot.w.postMessage({ id: job.id, ...job.payload })
+    }
+  },
 }
 
 function normalize(raw, scraper) {
