@@ -124,6 +124,17 @@ function setTab(k) {
   S.tab = k
   LS.set('tab', k)
   tabs()
+  // Eski sekmenin listesi/önizlemesi hemen temizlenir (yeni sekme yüklenirken Canlı TV seçili ama
+  // ortada film listesi duruyordu).
+  selGen++
+  S.items = []
+  S.listKind = 'none'
+  rendered.clear()
+  stopMini()
+  $('#listHead').replaceChildren()
+  $('#vspace').style.height = '0px'
+  $('#vspace').replaceChildren(h('div', { class: 'spin' }))
+  $('#preview').replaceChildren()
   renderGroups()
 }
 
@@ -157,7 +168,7 @@ async function renderGroupsInner(gen) {
   const col = $('#groups')
   const tab = S.tab
   let groups = []
-  const waiting = tab === 'n' ? !S.home : ['live', 'movie', 'series'].includes(tab) && curListId() && !chData.has(curListId())
+  const waiting = tab === 'n' ? !S.home : ['live', 'movie', 'series'].includes(tab) && curListId() && !chGroups.has(curListId())
   if (waiting) col.replaceChildren(h('div', { class: 'spin' }))
   if (tab === 'n') {
     if (!S.home) S.home = await cached('home', () => api('/api/home'))
@@ -185,14 +196,14 @@ async function renderGroupsInner(gen) {
       $('#preview').replaceChildren(h('div', { class: 'pvEmpty' }, h('div', {}, h('b', {}, '📡'), 'M3U linkini ya da Xtream bilgilerini ekle,', h('br'), 'kanallar TiviMate gibi burada dizilsin.')))
       return
     }
-    const data = await loadChannels(id)
+    const data = await loadGroups(id)
     if (gen !== groupsGen) return
     groups.push({ head: tab === 'live' ? 'Kanallar' : 'Kategoriler' })
     if (tab === 'live') {
       groups.push({ key: 'favs', title: 'Favoriler', icon: '★', count: S.store.favs.filter((k) => k.startsWith(id + ':')).length })
       groups.push({ key: 'recent', title: 'Son izlenenler', icon: '🕘' })
     }
-    groups.push({ key: 'all', title: 'Tümü', icon: '☰', count: (data.byKind[tab[0]] || []).length })
+    groups.push({ key: 'all', title: 'Tümü', icon: '☰', count: (data.groups[tab] || []).reduce((a, g) => a + g.count, 0) })
     for (const g of data.groups[tab] || []) groups.push({ key: 'grp:' + g.name, title: g.name, icon: '›', count: g.count })
   } else if (tab === 'search') {
     groups.push({ head: 'Ara' }, { key: 'search', title: 'Film & Dizi ara', icon: '🔍' })
@@ -260,25 +271,79 @@ async function selectGroupInner(g, initial, gen) {
   if (k === 'searchTv') return showTvSearch()
   // IPTV
   const id = curListId()
-  const data = await loadChannels(id)
-  let idx = data.byKind[S.tab === 'live' ? 'l' : S.tab[0]] || []
-  if (k === 'favs') idx = S.store.favs.filter((f) => f.startsWith(id + ':')).map((f) => +f.split(':')[1])
-  else if (k === 'recent') idx = S.store.recentCh.filter((f) => f.startsWith(id + ':')).map((f) => +f.split(':')[1])
-  else if (k.startsWith('grp:')) { const name = k.slice(4); idx = idx.filter((i) => data.ch[i][2] === name) }
-  showList('ch', g.title, idx, { initial, gen, listId: id, emptyText: k === 'favs' ? 'Kanala dokun, sağdan ☆ Favori.' : k === 'recent' ? 'Henüz kanal izlemedin.' : 'Burası boş.' })
+  const kind = KIND[S.tab]
+  const emptyText = k === 'favs' ? 'Kanala dokun, sağdan ☆ Favori.' : k === 'recent' ? 'Henüz kanal izlemedin.' : 'Burası boş.'
+  if (k === 'favs' || k === 'recent') {
+    const want = (k === 'favs' ? S.store.favs : S.store.recentCh).filter((f) => f.startsWith(id + ':')).map((f) => +f.split(':')[1])
+    const r = want.length ? await api(`/api/iptv/rows?id=${id}&idx=${want.join(',')}`) : { rows: [] }
+    keepRows(id, r?.rows || [])
+    return showList('ch', g.title, want.filter((i) => chRow(id, i)), { initial, gen, listId: id, emptyText })
+  }
+  const page = { id, kind, group: k.startsWith('grp:') ? k.slice(4) : '' }
+  const r = await fetchPage(page, 0)
+  const items = new Array(r.total)
+  r.rows.forEach((row, n) => (items[n] = row[0]))
+  showList('ch', g.title, items, { initial, gen, listId: id, page, emptyText })
 }
 
 // ---------------------------------------------------------------- IPTV veri
-const chData = new Map()
-async function loadChannels(id) {
-  if (chData.has(id)) return chData.get(id)
-  const r = await api('/api/iptv/channels?id=' + id)
-  const byKind = { l: [], m: [], s: [] }
-  r.ch.forEach((c, i) => byKind[c[4]]?.push(i))
-  byKind.live = byKind.l
-  const d = { ...r, byKind }
-  chData.set(id, d)
-  return d
+// Gruplar bir kez, kanallar sayfa sayfa (200'lük): 115 bin satırlık Xtream listesi eskiden tek
+// JSON'da iniyordu, sunucu çöküyor, arabanın tarayıcısı kilitleniyordu.
+const KIND = { live: 'l', movie: 'm', series: 's' }
+const PAGE = 200
+const chGroups = new Map() // id -> { groups, at }
+const chRows = new Map() // id -> Map(i -> [ad, logo, grup, tvg-id, tür, numara])
+async function loadGroups(id) {
+  if (chGroups.has(id)) return chGroups.get(id)
+  const r = await api('/api/iptv/groups?id=' + id)
+  if (!r) throw new Error('liste yok')
+  chGroups.set(id, r)
+  return r
+}
+function keepRows(id, rows) {
+  let m = chRows.get(id)
+  if (!m) chRows.set(id, (m = new Map()))
+  for (const r of rows) if (r) m.set(r[0], [r[1], r[2], r[3], r[4], r[6], r[5]])
+}
+const chRow = (id, i) => chRows.get(id)?.get(i)
+function forgetList(id) {
+  chGroups.delete(id)
+  chRows.delete(id)
+}
+async function fetchPage(page, from) {
+  const r = await api(`/api/iptv/rows?id=${page.id}&kind=${page.kind}&group=${encodeURIComponent(page.group)}&from=${from}&n=${PAGE}`)
+  if (!r) throw new Error('liste yok')
+  keepRows(page.id, r.rows)
+  return r
+}
+// Ekranda boş satır görünce o satırın sayfası istenir.
+const pagesLoading = new Set()
+function needPage(pos) {
+  const page = vOpts.page
+  if (!page) return
+  const from = Math.floor(pos / PAGE) * PAGE
+  const key = S.listKey + '|' + from
+  if (pagesLoading.has(key)) return
+  pagesLoading.add(key)
+  const items = S.items
+  fetchPage(page, from)
+    .then((r) => {
+      if (S.items !== items) return
+      r.rows.forEach((row, n) => (items[from + n] = row[0]))
+      vRender(true)
+      // hatırlanan seçili kanal bu sayfadaysa önizlemesi şimdi açılır
+      if (S.sel >= from && S.sel < from + r.rows.length && !$('#preview .pvBody')) select(S.sel, false)
+    })
+    .catch(() => {})
+    .finally(() => pagesLoading.delete(key))
+}
+async function ensurePos(pos) {
+  if (S.items[pos] != null || !vOpts.page) return S.items[pos]
+  const from = Math.floor(pos / PAGE) * PAGE
+  const items = S.items
+  const r = await fetchPage(vOpts.page, from)
+  r.rows.forEach((row, n) => (items[from + n] = row[0]))
+  return items[pos]
 }
 const epgCache = new Map()
 let epgPending = new Set()
@@ -379,9 +444,12 @@ function rowEl(i) {
         h('div', { class: 'rs' }, [it.year, it.rating && '★ ' + it.rating, it.kind === 'tv' ? 'Dizi' : 'Film', it._prog?.season ? `S${it._prog.season} B${it._prog.episode}` : null].filter(Boolean).join('  ·  ')),
         p && p.dur ? h('div', { class: 'rpg' }, h('i', { style: { width: Math.min(100, (p.pos / p.dur) * 100) + '%' } })) : null))
   }
-  // kanal
-  const d = chData.get(vOpts.listId)
-  const c = d.ch[it]
+  // kanal (sayfası henüz gelmediyse boş satır)
+  const c = it == null ? null : chRow(vOpts.listId, it)
+  if (!c) {
+    needPage(i)
+    return h('div', { class: 'row ghost' }, h('span', { class: 'rn' }, i + 1), h('div', { class: 'rl' }), h('div', { class: 'rb' }, h('div', { class: 'rt' }, '…')))
+  }
   const epg = S.tab === 'live' ? wantEpg(vOpts.listId, c[3]) : null
   const np = nowProg(epg)
   const fav = S.store.favs.includes(vOpts.listId + ':' + it)
@@ -396,6 +464,7 @@ function rowEl(i) {
 }
 
 function tapRow(i) {
+  if (S.listKind === 'ch' && S.items[i] == null) return
   // TiviMate: ilk dokunuş seçer/önizler, seçiliye tekrar dokunuş tam ekran oynatır.
   if (i === S.sel) {
     if (S.listKind === 'ch') return playChannel(S.items[i], vOpts.listId)
@@ -411,7 +480,7 @@ function select(i, user) {
   rendered.get(i)?.classList.add('on')
   if (i < 0) return
   if (S.listKind === 'meta') renderPreviewMeta(S.items[i])
-  else if (S.listKind === 'ch') renderPreviewCh(S.items[i], false, user)
+  else if (S.listKind === 'ch' && S.items[i] != null) renderPreviewCh(S.items[i], false, user)
 }
 
 async function showShelf(id, title, ranked, initial, gen) {
@@ -455,18 +524,18 @@ function showSearch() {
 async function showTvSearch() {
   const inp = h('input', { class: 'search', placeholder: 'Kanal adı…', enterkeyhint: 'search' })
   $('#listHead').replaceChildren(inp)
-  const lists = S.iptv.filter((l) => l.counts?.live)
-  await Promise.all(lists.map((l) => loadChannels(l.id)))
+  const id = (S.iptv.find((l) => l.id === LS.get('iptvList', null) && l.counts?.live) || S.iptv.find((l) => l.counts?.live))?.id
   let t = null
-  const run = () => {
-    const q = inp.value.trim().toLocaleLowerCase('tr')
-    if (q.length < 2) return showList('ch', '', [], { keepHead: true, emptyText: 'Kanal adı yaz.', listId: lists[0]?.id })
-    const id = lists[0].id
-    const d = chData.get(id)
-    const idx = d.byKind.l.filter((i) => d.ch[i][0].toLocaleLowerCase('tr').includes(q)).slice(0, 500)
-    showList('ch', '', idx, { keepHead: true, listId: id, emptyText: 'Bulunamadı.' })
+  const run = async () => {
+    const q = inp.value.trim()
+    if (!id) return showList('ch', '', [], { keepHead: true, emptyText: 'Canlı kanal listesi yok.' })
+    if (q.length < 2) return showList('ch', '', [], { keepHead: true, emptyText: 'Kanal adı yaz.', listId: id })
+    const r = await api(`/api/iptv/rows?id=${id}&kind=l&q=${encodeURIComponent(q)}`).catch(() => null)
+    if (!inp.isConnected || inp.value.trim() !== q) return
+    keepRows(id, r?.rows || [])
+    showList('ch', '', (r?.rows || []).map((x) => x[0]), { keepHead: true, listId: id, emptyText: 'Bulunamadı.' })
   }
-  inp.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 200) })
+  inp.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 300) })
   run()
   setTimeout(() => inp.focus(), 50)
 }
@@ -542,8 +611,8 @@ function stopMini() {
 }
 async function renderPreviewCh(i, epgOnly, user) {
   const id = vOpts.listId
-  const d = chData.get(id)
-  const c = d.ch[i]
+  const c = chRow(id, i)
+  if (!c) return
   const pv = $('#preview')
   const epg = S.tab === 'live' ? wantEpg(id, c[3]) : null
   const key = id + ':' + i
@@ -799,8 +868,8 @@ function newEngine() {
 
 // ---- canlı kanal
 async function playChannel(i, listId) {
-  const d = chData.get(listId)
-  const c = d.ch[i]
+  const c = chRow(listId, i)
+  if (!c) return
   const key = listId + ':' + i
   S.playingKey = key
   post('/api/recent', { key }).then((r) => (S.store.recentCh = r)).catch(() => {})
@@ -840,24 +909,26 @@ function osd(c) {
   st.append(el)
   setTimeout(() => el.remove(), 4000)
 }
-function zap(dir) {
-  if (!P.ctx?.live || S.listKind !== 'ch') return
+async function zap(dir) {
+  if (!P.ctx?.live || S.listKind !== 'ch' || !S.items.length) return
   const pos = S.items.indexOf(P.ctx.index)
-  const next = S.items[(pos + dir + S.items.length) % S.items.length]
+  const np = (pos + dir + S.items.length) % S.items.length
+  const next = await ensurePos(np).catch(() => null)
   if (next == null) return
-  select(S.items.indexOf(next), false)
+  select(np, false)
   stopMini()
   playChannel(next, P.ctx.listId)
 }
 function chSheet() {
   const sh = $('#sheet')
-  const d = chData.get(P.ctx.listId)
   sh.hidden = false
   const body = h('div', { class: 'sheetBody' })
   sh.replaceChildren(h('h3', {}, h('span', {}, 'Kanallar'), h('button', { class: 'pBtn', onclick: () => (sh.hidden = true) }, '✕')), body)
   const list = S.listKind === 'ch' ? S.items : []
-  for (const i of list.slice(0, 400)) {
-    const c = d.ch[i]
+  const at = Math.max(0, list.indexOf(P.ctx.index) - 150)
+  for (const i of list.slice(at, at + 400)) {
+    const c = i == null ? null : chRow(P.ctx.listId, i)
+    if (!c) continue
     const np = nowProg(wantEpg(P.ctx.listId, c[3]))
     body.append(h('button', { class: 'opt' + (i === P.ctx.index ? ' on' : ''), onclick: () => { sh.hidden = true; select(S.items.indexOf(i), false); playChannel(i, P.ctx.listId) } },
       h('span', { class: 'rn' }, c[5]), c[1] ? h('div', { class: 'rl', style: { backgroundImage: `url("${c[1]}")`, width: '70px', height: '44px' } }) : null,
@@ -1032,7 +1103,7 @@ function openIptv() {
   const lists = h('div', { class: 'lst' })
   const drawLists = () => lists.replaceChildren(...S.iptv.map((l) => h('div', { class: 'lstRow' },
     h('div', { class: 'lb' }, h('div', { class: 'l1' }, l.name), h('div', { class: 'l2' }, `${l.counts?.live || 0} kanal · ${l.counts?.movie || 0} film · ${l.counts?.series || 0} dizi${l.epgUrl ? ' · EPG' : ''}${l.error ? ' · ⚠ ' + l.error : ''}`)),
-    h('button', { class: 'sm', onclick: async (e) => { e.target.textContent = '…'; const r = await api('/api/iptv/refresh?id=' + l.id).catch((x) => ({ ok: false, error: String(x) })); chData.delete(l.id); if (!r.ok) err.textContent = r.error; await reloadIptv(); drawLists(); renderGroups() } }, 'Yenile'),
+    h('button', { class: 'sm', onclick: async (e) => { e.target.textContent = '…'; const r = await api('/api/iptv/refresh?id=' + l.id).catch((x) => ({ ok: false, error: String(x) })); forgetList(l.id); if (!r.ok) err.textContent = r.error; await reloadIptv(); drawLists(); renderGroups() } }, 'Yenile'),
     h('button', { class: 'sm red', onclick: (e) => delList(l, e.currentTarget) }, 'Sil'))))
   // confirm() arabanın tarayıcısında hiç açılmıyor (hep "hayır" dönüyor): silme bu yüzden çalışmıyordu.
   // Onun yerine ikinci dokunuş: "Emin misin?" 4 sn bekler.
@@ -1050,7 +1121,7 @@ function openIptv() {
       err.textContent = 'Silinemedi: ' + x
       return drawLists()
     }
-    chData.delete(l.id)
+    forgetList(l.id)
     if (LS.get('iptvList', null) === l.id) LS.set('iptvList', null)
     saveBackup()
     drawLists()

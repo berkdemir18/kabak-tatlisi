@@ -152,6 +152,9 @@ const pool = {
         clearTimeout(job.timer)
         job.resolve(m)
         this.pump()
+        // Boşta kalan iş parçacığı 30 sn sonra kapanır: tarama bitince 6 tanesi Render'ın 512 MB'ını
+        // tutmaya devam ediyordu (IPTV ile birleşince sunucu çöküp diski siliyordu).
+        if (!slot.busy) { clearTimeout(slot.idleT); slot.idleT = setTimeout(() => { if (!slot.busy) slot.w.terminate().catch(() => {}) }, 30000) }
       }
     })
     const dead = () => {
@@ -176,6 +179,7 @@ const pool = {
       if (!this.queue.length) break
       if (slot.busy || !slot.ready) continue
       const job = this.queue.shift()
+      clearTimeout(slot.idleT)
       slot.busy = job
       job.timer = setTimeout(() => {
         // Takılan eklenti: iş parçacığını öldür (kalan fetch'leri de gider), yenisi açılır.

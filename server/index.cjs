@@ -380,11 +380,15 @@ async function api(req, res, u) {
       return json(req, res, { ok: false, error: String(e?.message || e) })
     }
   }
-  if (p === '/api/iptv/channels') {
+  // Sadece gruplar; kanallar sayfa sayfa /api/iptv/rows'tan (115 bin satırı tek JSON'da yollamak
+  // hem sunucuyu çökertiyor hem arabanın tarayıcısını kilitliyordu).
+  if (p === '/api/iptv/groups') {
     const d = await iptv.channels(q.get('id'))
-    if (!d) return json(req, res, null)
-    // Istemciye kisa anahtarlar: n ad, l logo, g grup, t tvg-id, k tur, c numara
-    return json(req, res, { groups: d.groups, at: d.at, ch: d.channels.map((c) => [c.name, c.logo, c.group, c.tvgId, c.kind[0], c.num]) })
+    return json(req, res, d ? { groups: d.groups, at: d.at } : null)
+  }
+  if (p === '/api/iptv/rows') {
+    const idx = q.get('idx') ? q.get('idx').split(',').map(Number).filter((n) => n >= 0).slice(0, 500) : null
+    return json(req, res, await iptv.rows(q.get('id'), { kind: q.get('kind') || '', group: q.get('group'), q: q.get('q'), from: +q.get('from') || 0, n: +q.get('n') || 200, idx }))
   }
   if (p === '/api/iptv/play') {
     const id = q.get('id')

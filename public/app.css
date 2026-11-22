@@ -27,7 +27,7 @@ img { display: block; }
 /* ---------- üst çubuk ---------- */
 .top { height: 76px; flex: none; display: flex; align-items: center; gap: 18px; padding: 0 22px; border-bottom: 1px solid var(--line); background: linear-gradient(#0d0f12, var(--bg)); }
 .brand { display: flex; align-items: center; gap: 12px; height: 56px; padding-right: 10px; }
-.brand b { width: 44px; height: 44px; border-radius: 12px; background: var(--acc); display: grid; place-items: center; font-weight: 900; font-size: 26px; color: #fff; }
+.brand img { height: 42px; width: auto; }
 .brand span { font-weight: 800; font-size: 21px; letter-spacing: -.02em; }
 .brand i { color: var(--acc2); font-style: normal; }
 .tabs { display: flex; gap: 6px; flex: 1; overflow-x: auto; scrollbar-width: none; }
@@ -64,6 +64,7 @@ img { display: block; }
 .row { text-align: left; position: absolute; left: 0; right: 0; height: var(--row); display: flex; align-items: center; gap: 14px; padding: 0 16px 0 14px; border-left: 4px solid transparent; }
 .row.on { background: var(--sel); border-left-color: var(--selLine); }
 .row.playing .rn { color: var(--acc2); }
+.row.ghost { opacity: .35; }
 .row:not(.on):active { background: var(--p2); }
 .rn { width: 46px; flex: none; text-align: right; color: var(--mut); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 650; }
 .rn.big { font-size: 30px; font-weight: 900; color: #fff; -webkit-text-stroke: 0; }
