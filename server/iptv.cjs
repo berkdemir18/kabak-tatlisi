@@ -109,6 +109,93 @@ function makeParser() {
   return { line, done }
 }
 
+// ---------------------------------------------------------------- kategoriler
+// Grup adından (o boşsa/genelse kanal adından) konu çıkar: "SPOR KANALLARI" + "YABANCI SPOR" → Spor,
+// "TR | BEIN" → Spor. Eşleşme sırası önemli (YABANCI SPOR önce Spor'a düşer), gösterim sırası ayrı.
+const LIVE_THEMES = [
+  ['radyo', '📻', 'Radyo', /radyo|radio|\bfm\b/i],
+  ['cocuk', '🧸', 'Çocuk', /çocuk|cocuk|kids|child|cartoon|çizgi|cizgi|disney|nick|baby|minika|cartoon/i],
+  ['spor', '⚽', 'Spor', /spor|sport|bein|futbol|football|soccer|\bnba\b|\bf1\b|eurosport|arena/i],
+  ['haber', '📰', 'Haber', /haber|news|cnn|al ?jazeera|ntv\b|tgrt|halk tv|sözcü|sozcu/i],
+  ['belgesel', '🌍', 'Belgesel', /belgesel|document|nat ?geo|discovery|history|animal|viasat|da ?vinci|bbc earth/i],
+  ['muzik', '🎵', 'Müzik', /müzik|muzik|music|\bmtv\b|kral|power ?t[uü]rk|number ?1|dream ?t[uü]rk/i],
+  ['dini', '🕌', 'Dini', /dini|religi|islam|kuran|quran|diyanet|semerkand|mekke|lalegül|dua/i],
+  ['sinema', '🎬', 'Sinema & Dizi', /sinema|cinema|film|movie|dizi|series|\bvod\b|blu ?tv|tabii|netflix|digiturk|d-?smart|tivibu|sinemax|yesilcam|yeşilçam/i],
+  ['yerel', '📍', 'Yerel', /yerel|local|bölgesel|bolgesel/i],
+  ['yabanci', '🌐', 'Yabancı & Bölgesel', /avrupa|europe|yabanc|foreign|international|azerbaycan|azerbaijan|kıbrıs|kibris|cyprus|kürt|kurd|arap|arab|german|deutsch|alman|\buk\b|\busa?\b|\bde\b|\bfr\b|\bnl\b|\bru\b|balkan|türkmen|turkmen|iran|irak|ira[qk]|\bit\b|\bes\b/i],
+  ['ulusal', '📺', 'Ulusal', /ulusal|national|genel|general|eğlence|eglence|entertainment|t[uü]rk|\btr\b|trt|\batv\b|show ?tv|star ?tv|kanal ?d|\bnow\b|tv ?8|teve2|beyaz ?tv|kanal ?7/i],
+]
+const LIVE_ORDER = ['ulusal', 'spor', 'haber', 'sinema', 'belgesel', 'cocuk', 'muzik', 'dini', 'yerel', 'yabanci', 'radyo', 'diger']
+const VOD_THEMES = [
+  ['yeni', '🆕', 'Yeni Eklenenler', /yeni|\bnew\b|vizyon|son eklenen|latest|recent/i],
+  ['platform', '📺', 'Platformlar', /netflix|disney|amazon|prime|\bhbo\b|\bmax\b|exxen|blu ?tv|tabii|\bgain\b|apple ?tv|mubi|puhu/i],
+  ['cocuk', '🧸', 'Çocuk & Animasyon', /çocuk|cocuk|kids|animasyon|animation|anime|çizgi|cizgi|cartoon|disney|pixar|aile|family/i],
+  ['korku', '👻', 'Korku & Gerilim', /korku|horror|gerilim|thriller|slasher/i],
+  ['bilimkurgu', '🚀', 'Bilim Kurgu & Fantastik', /bilim ?kurgu|sci-?fi|fantasti|fantasy|science/i],
+  ['aksiyon', '💥', 'Aksiyon & Macera', /aksiyon|action|macera|adventure|savaş|savas|\bwar\b|western/i],
+  ['komedi', '😂', 'Komedi', /komedi|comedy/i],
+  ['suc', '🔪', 'Suç & Gizem', /suç|\bsuc\b|crime|polisiye|mafya|gizem|mystery/i],
+  ['dram', '🎭', 'Dram & Romantik', /dram|drama|romant|romance|\başk\b/i],
+  ['belgesel', '🌍', 'Belgesel', /belgesel|document|biyografi|biography|tarih|history/i],
+  ['yerli', '🇹🇷', 'Yerli', /yerli|t[uü]rk|\btr\b|yeşilçam|yesilcam/i],
+  ['uhd', '✨', '4K / UHD', /\b4k\b|uhd|2160/i],
+  ['yabanci', '🌐', 'Yabancı', /yabanc|foreign|english|ingilizce|altyaz|\ben\b|\bus\b|\buk\b/i],
+]
+const VOD_ORDER = ['yeni', 'platform', 'yerli', 'aksiyon', 'komedi', 'dram', 'korku', 'bilimkurgu', 'suc', 'cocuk', 'belgesel', 'uhd', 'yabanci', 'diger']
+const info = (list) => ({ ...Object.fromEntries(list.map(([k, icon, title]) => [k, { icon, title }])), diger: { icon: '☰', title: 'Diğer' } })
+const LIVE_INFO = info(LIVE_THEMES)
+const VOD_INFO = info(VOD_THEMES)
+// Hem metnin kendisine hem Türkçe küçük harfine bakılır: JS büyük İ'yi i saymıyor ("SİNEMA" kaçıyordu),
+// tr küçültmesi de I'yı ı yapıyor ("KIDS" kaçıyordu).
+const themeOf = (text, list) => { const lo = text.toLocaleLowerCase('tr'); return list.find((t) => t[3].test(text) || t[3].test(lo))?.[0] || null }
+
+// Her satıra konu yazılır (r[9]); dizi bölümleri diziye bağlanır (r[10]).
+// "Dizi Adı S01 E05", "Dizi Adı - S1E5", "Dizi Adı 1. Sezon 5. Bölüm"
+const EP_RE = /^(.*?)[\s._\-|]*(?:S(?:ezon)?\s*(\d{1,2})[\s._-]*(?:E|B|Bölüm|Bolum)\s*(\d{1,4})|(\d{1,2})\.\s*Sezon\s*(\d{1,4})\.\s*B[öo]l[üu]m)/i
+function episodeOf(name) {
+  const m = EP_RE.exec(name)
+  if (!m || !m[1].trim()) return null
+  return { show: m[1].replace(/[\s\-|:._]+$/, '').trim(), s: +(m[2] || m[4]), e: +(m[3] || m[5]) }
+}
+function classify(rows) {
+  const byGroup = new Map()
+  const intern = new Map()
+  const str = (v) => { let x = intern.get(v); if (x === undefined) { intern.set(v, v); x = v } return x }
+  for (const r of rows) {
+    const list = r[4] === 'l' ? LIVE_THEMES : VOD_THEMES
+    const gk = r[4] + '\u0000' + r[2]
+    let gt = byGroup.get(gk)
+    if (gt === undefined) byGroup.set(gk, (gt = themeOf(r[2], list)))
+    r[9] = gt || themeOf(r[0], list) || 'diger'
+    if (r[4] === 's') {
+      const ep = episodeOf(r[0])
+      r[10] = str(r[2] + '\u0000' + (ep ? ep.show.toLocaleLowerCase('tr') : r[0]))
+    }
+  }
+}
+function themeSummary(rows) {
+  const out = {}
+  const K = { l: 'live', m: 'movie', s: 'series' }
+  const acc = {}
+  for (const r of rows) {
+    const k = K[r[4]]
+    const t = ((acc[k] ||= new Map()).get(r[9])) || { count: 0, groups: new Map(), seen: new Set() }
+    // dizide bölüm değil dizi sayılır
+    if (r[4] === 's') { if (t.seen.has(r[10])) continue; t.seen.add(r[10]) }
+    t.count++
+    t.groups.set(r[2], (t.groups.get(r[2]) || 0) + 1)
+    acc[k].set(r[9], t)
+  }
+  for (const [k, m] of Object.entries(acc)) {
+    const order = k === 'live' ? LIVE_ORDER : VOD_ORDER
+    const inf = k === 'live' ? LIVE_INFO : VOD_INFO
+    out[k] = [...m]
+      .sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]))
+      .map(([key, t]) => ({ key, ...inf[key], count: t.count, groups: [...t.groups].map(([name, count]) => ({ name, count })) }))
+  }
+  return out
+}
+
 // Gövdeyi (gzip olsun olmasın) satır satır okur.
 async function* lines(body) {
   const it = Readable.fromWeb(body)[Symbol.asyncIterator]()
@@ -155,7 +242,7 @@ async function parseList(list) {
 async function writeRows(id, data) {
   const f = chFile(id)
   const ws = fs.createWriteStream(f + '.tmp')
-  ws.write(JSON.stringify({ at: data.at, groups: data.groups }) + '\n')
+  ws.write(JSON.stringify({ at: data.at, groups: data.groups, themes: data.themes }) + '\n')
   for (let i = 0; i < data.rows.length; i += 2000) {
     if (!ws.write(data.rows.slice(i, i + 2000).map((r) => JSON.stringify(r)).join('\n') + '\n')) await once(ws, 'drain')
   }
@@ -180,6 +267,7 @@ async function readRows(id) {
     buf = buf.slice(from)
   }
   if (!head || !Array.isArray(rows[0])) throw new Error('eski ya da bozuk kayıt')
+  if (!head.themes || rows[0].length < 10) { classify(rows); head.themes = themeSummary(rows) }
   return { ...head, rows }
 }
 
@@ -188,7 +276,8 @@ function load(list) {
   if (loading.has(list.id)) return loading.get(list.id)
   const p = (async () => {
     const parsed = await parseList(list)
-    const data = { rows: parsed.rows, groups: parsed.groups, at: Date.now() }
+    classify(parsed.rows)
+    const data = { rows: parsed.rows, groups: parsed.groups, themes: themeSummary(parsed.rows), at: Date.now() }
     mem.set(list.id, data)
     await writeRows(list.id, data).catch(() => {})
     list.count = data.rows.length
@@ -244,41 +333,69 @@ async function channels(id) {
 }
 
 // Tür + grup dizini (bir kez kurulur): grup açılınca 115 bin satır baştan taranmasın.
-function index(data, kind, group) {
+function index(data, kind, group, theme) {
   data.idx ||= new Map()
-  const key = kind + '\u0000' + (group ?? '')
+  const key = kind + '\u0000' + (group ?? '') + '\u0000' + (theme ?? '')
   let a = data.idx.get(key)
   if (!a) {
     const out = []
-    for (let i = 0; i < data.rows.length; i++) { const r = data.rows[i]; if (r[4] === kind && (group == null || r[2] === group)) out.push(i) }
+    // dizide her diziden tek satır (ilk bölüm): 78 bin bölüm yerine dizi listesi
+    const seen = kind === 's' ? new Set() : null
+    for (let i = 0; i < data.rows.length; i++) {
+      const r = data.rows[i]
+      if (r[4] !== kind || (group != null && r[2] !== group) || (theme != null && r[9] !== theme)) continue
+      if (seen) { if (seen.has(r[10])) continue; seen.add(r[10]) }
+      out.push(i)
+    }
     a = Int32Array.from(out)
     if (data.idx.size > 60) data.idx.delete(data.idx.keys().next().value)
     data.idx.set(key, a)
   }
   return a
 }
-// Tarayıcıya giden kısa satır: [i, ad, logo, grup, tvg-id, numara, tür]
-const slim = (data, i) => { const r = data.rows[i]; return r ? [i, r[0], r[1], r[2], r[3], r[5], r[4]] : null }
+// Tarayıcıya giden kısa satır: [i, ad, logo, grup, tvg-id, numara, tür]. Dizide ad = dizi adı.
+const showName = (r) => (r[4] === 's' ? episodeOf(r[0])?.show || r[0] : r[0])
+const slim = (data, i, asShow) => { const r = data.rows[i]; return r ? [i, asShow ? showName(r) : r[0], r[1], r[2], r[3], r[5], r[4]] : null }
 
 // Sayfa sayfa satır: tarayıcı sadece ekrandakini ister (eskiden bütün liste tek JSON'da iniyordu).
-async function rows(id, { kind, group, q, from = 0, n = 200, idx }) {
+async function rows(id, { kind, group, theme, q, from = 0, n = 200, idx }) {
   const data = await channels(id)
   if (!data) return null
   if (idx) return { total: idx.length, rows: idx.map((i) => slim(data, i)).filter(Boolean) }
   if (q) {
     const needle = q.toLocaleLowerCase('tr')
     const out = []
+    const seenShow = new Set()
     for (let i = 0; i < data.rows.length && out.length < 300; i++) {
       const r = data.rows[i]
-      if ((!kind || r[4] === kind) && r[0].toLocaleLowerCase('tr').includes(needle)) out.push(slim(data, i))
+      if ((!kind || r[4] === kind) && r[0].toLocaleLowerCase('tr').includes(needle)) {
+        if (r[4] === 's') { if (seenShow.has(r[10])) continue; seenShow.add(r[10]) }
+        out.push(slim(data, i, r[4] === 's'))
+      }
     }
     return { total: out.length, rows: out }
   }
-  const a = index(data, kind, group || null)
+  const a = index(data, kind, group || null, theme || null)
   const end = Math.min(a.length, from + Math.min(n, 500))
   const out = []
-  for (let k = from; k < end; k++) out.push(slim(data, a[k]))
+  for (let k = from; k < end; k++) out.push(slim(data, a[k], kind === 's'))
   return { total: a.length, from, rows: out }
+}
+
+// Bir dizinin bütün bölümleri (sezon/bölüm sırasıyla).
+async function episodes(id, i) {
+  const data = await channels(id)
+  const r0 = data?.rows[i]
+  if (!r0) return null
+  const out = []
+  for (let k = 0; k < data.rows.length; k++) {
+    const r = data.rows[k]
+    if (r[10] !== r0[10]) continue
+    const ep = episodeOf(r[0])
+    out.push({ row: slim(data, k), s: ep?.s || 1, e: ep?.e || out.length + 1 })
+  }
+  out.sort((a, b) => a.s - b.s || a.e - b.e)
+  return { show: showName(r0), logo: r0[1], group: r0[2], eps: out }
 }
 
 async function refresh(id) {
@@ -385,4 +502,4 @@ async function epg(id, tvgIds) {
 // Yedek için listelerin tanımı (şifreli adres dahil; yalnız girişli kullanıcıya).
 const exportDefs = () => state.lists.map((l) => ({ id: l.id, name: l.name, url: l.url, text: l.text, epgUrl: l.epgUrl }))
 
-module.exports = { exportDefs, init, add, remove, lists, channels, rows, refresh, channel, epg }
+module.exports = { exportDefs, init, add, remove, lists, channels, rows, episodes, refresh, channel, epg }

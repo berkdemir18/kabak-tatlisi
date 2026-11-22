@@ -37,6 +37,19 @@ img { display: block; }
 .tab:not(.on):active { background: var(--p3); }
 .topBtn { height: 52px; padding: 0 20px; border-radius: 26px; background: var(--p3); color: #d6d9de; font-weight: 650; font-size: 17px; white-space: nowrap; flex: none; }
 .topBtn:active { background: #2a303a; }
+.g.child { min-height: 52px; padding-left: 52px; font-size: 16px; color: #aab0b8; }
+.g.theme::after { content: "▾"; color: var(--dim); font-size: 14px; margin-left: 4px; transition: transform .15s; transform: rotate(-90deg); }
+.g.theme.open::after { transform: none; }
+.pvHero.poster { aspect-ratio: auto; height: 300px; background: radial-gradient(circle at 30% 40%, #1d2128, var(--bg)); display: grid; place-items: center; }
+.pvHero.poster::after { display: none; }
+.pvHero.poster .pvPoster { height: 260px; max-width: 80%; object-fit: contain; border-radius: 12px; }
+.pvHero.poster + .pvBody { margin-top: 18px; }
+.showHead { display: flex; gap: 26px; padding: 28px 30px 0; align-items: flex-start; }
+.showHead .pvPoster { width: 170px; max-height: 250px; object-fit: cover; border-radius: 12px; flex: none; background: var(--p2); }
+.pvBody.plain { margin-top: 0; padding: 0 0 40px; flex: 1; min-width: 0; }
+.ep.compact { padding: 14px 16px; }
+.ep .epn { width: 44px; height: 44px; border-radius: 12px; background: var(--p3); display: grid; place-items: center; font-weight: 800; flex: none; font-variant-numeric: tabular-nums; }
+.ep.seen .epn { background: #1d3a2a; color: var(--ok); }
 .gAdd.top { margin: 4px 18px 10px; }
 .clock { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; color: #d6d6d6; min-width: 76px; text-align: right; }
 

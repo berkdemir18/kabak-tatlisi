@@ -39,6 +39,18 @@ hub.init({ tmdbApiKey: TMDB, dir: path.join(DATA, 'hub') })
 plugins.init({ tmdbApiKey: TMDB, dir: path.join(DATA, 'plugins') })
 iptv.init(path.join(DATA, 'iptv'))
 setTimeout(() => plugins.ensure().catch(() => {}), 500)
+// Raflar açılışta arkada ısıtılır: deploy sonrası (Render diski boş) ilk menü tıklaması 10+ sn sürüyordu.
+async function warmShelves() {
+  const home = hub.home()
+  const ids = home.shelves.map((x) => x.id)
+  for (const p of home.platforms) ids.push(...(hub.platformPage(p.key)?.shelves || []).slice(0, 5).map((x) => x.id))
+  for (const id of ids) {
+    await hub.shelfItems(id, 1).catch(() => {})
+    await new Promise((r) => setTimeout(r, 250))
+  }
+}
+setTimeout(() => warmShelves().catch(() => {}), 4000)
+setInterval(() => warmShelves().catch(() => {}), 6 * 3600e3)
 setInterval(() => plugins.ensure().catch(() => {}), 3600e3)
 
 // ---------------------------------------------------------------- kayit (Listem, kaldigin yer)
@@ -102,6 +114,8 @@ async function body(req) {
 }
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/manifest+json', '.ico': 'image/x-icon', '.webp': 'image/webp' }
+// Statik dosyalar bellekte, sıkıştırılmış halleriyle; ETag ile değişmediyse 304 (araba her açılışta
+// app.js'i baştan indirmesin, sunucu her istekte yeniden sıkıştırmasın).
 const staticCache = new Map()
 function serveStatic(req, res, file) {
   const f = path.normalize(path.join(PUB, file))
@@ -110,15 +124,24 @@ function serveStatic(req, res, file) {
   try {
     const st = fs.statSync(f)
     if (!c || c.mtime !== st.mtimeMs) {
-      c = { mtime: st.mtimeMs, buf: fs.readFileSync(f) }
+      const buf = fs.readFileSync(f)
+      const type = MIME[path.extname(f)] || 'application/octet-stream'
+      const gz = /json|text|javascript|css|html|svg/.test(type) && buf.length > 1400 ? zlib.gzipSync(buf, { level: 9 }) : null
+      c = { mtime: st.mtimeMs, buf, gz, type, etag: '"' + crypto.createHash('sha1').update(buf).digest('base64url').slice(0, 16) + '"' }
       staticCache.set(f, c)
     }
   } catch {
     return send(req, res, 404, 'yok', 'text/plain')
   }
-  const type = MIME[path.extname(f)] || 'application/octet-stream'
-  const long = /hls|mpegts/.test(file)
-  send(req, res, 200, c.buf, type, { 'cache-control': long ? 'public, max-age=604800' : 'no-cache' })
+  const long = /hls|mpegts|logo-b|icon/.test(file)
+  const h = { 'content-type': c.type, 'cache-control': long ? 'public, max-age=604800' : 'no-cache', etag: c.etag, vary: 'accept-encoding' }
+  if (req.headers['if-none-match'] === c.etag) return res.writeHead(304, h).end()
+  const useGz = c.gz && /gzip/.test(req.headers['accept-encoding'] || '')
+  const body = useGz ? c.gz : c.buf
+  if (useGz) h['content-encoding'] = 'gzip'
+  h['content-length'] = body.length
+  res.writeHead(200, h)
+  res.end(body)
 }
 
 // ---------------------------------------------------------------- yayin aktarma (proxy.cjs'in web hali)
@@ -238,7 +261,7 @@ function getScan(r) {
   const key = `${r.kind}:${r.tmdbId}:${r.season ?? ''}:${r.episode ?? ''}`
   const old = scans.get(key)
   if (old && !old.cancelled && (!old.done || Date.now() - old.at < SCAN_TTL)) return old
-  const scan = { streams: [], total: 0, finished: 0, done: false, at: Date.now(), subs: new Set(), cancelled: false }
+  const scan = { streams: [], total: 0, finished: 0, done: false, at: Date.now(), subs: new Set(), cancelled: false, pending: new Set() }
   scans.set(key, scan)
   const active = [...scans.values()].filter((x) => !x.done && !x.cancelled && x !== scan)
   for (const x of active.slice(0, Math.max(0, active.length - 1))) if (!x.subs.size) x.cancelled = true
@@ -254,14 +277,25 @@ function getScan(r) {
         (p) => {
           scan.total = p.total
           scan.finished = p.finished
-          const streams = (p.streams || []).map(webStream)
-          if (streams.length) scan.streams.push(...streams)
-          push({ total: p.total, finished: p.finished, streams, scraper: p.scraper })
+          push({ total: p.total, finished: p.finished, streams: [], scraper: p.scraper })
+          if (!p.streams?.length) return
+          // Kaynak tarayıcıya gitmeden önce yoklanır: Render'ın IP'sini reddeden (428/403/404)
+          // kaynaklar listenin başına geçip oynatıcıyı boşuna oyalıyordu.
+          const job = Promise.all(p.streams.map((s) => probe(s).then((ok) => (ok ? s : null)))).then((list) => {
+            const streams = list.filter(Boolean).map(webStream)
+            scan.dropped = (scan.dropped || 0) + list.length - streams.length
+            if (!streams.length || scan.cancelled) return
+            scan.streams.push(...streams)
+            push({ total: scan.total, finished: scan.finished, streams })
+          })
+          scan.pending.add(job)
+          job.finally(() => scan.pending.delete(job))
         },
         () => scan.cancelled
       )
     )
-    .finally(() => {
+    .finally(async () => {
+      await Promise.allSettled([...scan.pending])
       scan.done = true
       scan.at = Date.now()
       if (scan.cancelled) scans.delete(key)
@@ -270,6 +304,20 @@ function getScan(r) {
       scan.subs.clear()
     })
   return scan
+}
+async function probe(s) {
+  const ctrl = new AbortController()
+  let timedOut = false
+  const t = setTimeout(() => { timedOut = true; ctrl.abort() }, 6000)
+  try {
+    const up = await fetch(s.url, { headers: upstreamHeaders(s.headers), signal: ctrl.signal, redirect: 'follow' })
+    return up.status < 400 || up.status === 405
+  } catch {
+    return timedOut // yavaş ama belki yaşıyor: ele değil, sona düşer
+  } finally {
+    clearTimeout(t)
+    ctrl.abort()
+  }
 }
 // Tarayici yayini her zaman bizim uzerimizden alir: Referer/Origin basliklari, CORS ve http→https.
 const webStream = (s) => ({ ...s, play: streamUrl(s.url, s.headers), subtitles: (s.subtitles || []).map((x) => ({ ...x, url: subUrl(x.url, s.headers) })) })
@@ -350,11 +398,12 @@ async function api(req, res, u) {
       store = { ...store, ...b.store }
       saveStore()
     }
-    let added = 0
-    if (!iptv.lists().length && Array.isArray(b.iptv)) for (const d of b.iptv) { try { await iptv.add(d); added++ } catch {} }
+    // IPTV listeleri arkada iner (büyük liste dakika sürebilir): sayfa beklemeden açılır.
+    const defs = !iptv.lists().length && Array.isArray(b.iptv) ? b.iptv : []
+    ;(async () => { for (const d of defs) await iptv.add(d).catch(() => {}) })()
     fresh = false
     saveStore()
-    return json(req, res, { ok: true, restoredStore: empty && !!b.store, added })
+    return json(req, res, { ok: true, restoredStore: empty && !!b.store, pendingIptv: defs.length })
   }
   // IPTV
   if (p === '/api/iptv' && m === 'GET') return json(req, res, iptv.lists())
@@ -384,12 +433,13 @@ async function api(req, res, u) {
   // hem sunucuyu çökertiyor hem arabanın tarayıcısını kilitliyordu).
   if (p === '/api/iptv/groups') {
     const d = await iptv.channels(q.get('id'))
-    return json(req, res, d ? { groups: d.groups, at: d.at } : null)
+    return json(req, res, d ? { groups: d.groups, themes: d.themes, at: d.at } : null)
   }
   if (p === '/api/iptv/rows') {
     const idx = q.get('idx') ? q.get('idx').split(',').map(Number).filter((n) => n >= 0).slice(0, 500) : null
-    return json(req, res, await iptv.rows(q.get('id'), { kind: q.get('kind') || '', group: q.get('group'), q: q.get('q'), from: +q.get('from') || 0, n: +q.get('n') || 200, idx }))
+    return json(req, res, await iptv.rows(q.get('id'), { kind: q.get('kind') || '', group: q.get('group'), theme: q.get('theme'), q: q.get('q'), from: +q.get('from') || 0, n: +q.get('n') || 200, idx }))
   }
+  if (p === '/api/iptv/episodes') return json(req, res, await iptv.episodes(q.get('id'), +q.get('i')))
   if (p === '/api/iptv/play') {
     const id = q.get('id')
     await iptv.channels(id)

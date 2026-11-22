@@ -29,6 +29,9 @@ function init(opts) {
   try {
     state = { ...state, ...JSON.parse(fs.readFileSync(stateFile(), 'utf8')) }
   } catch {}
+  try {
+    stats = JSON.parse(fs.readFileSync(statsFile(), 'utf8'))
+  } catch {}
 }
 
 async function getText(url) {
@@ -122,6 +125,26 @@ function list() {
 
 // Eklenti kodu bellekte tutulur: her taramada 16 dosya ana süreçte eşzamanlı okunmasın.
 const codeCache = new Map()
+// Eklenti karnesi: kaç kez koştu, kaçında kaynak buldu, kaçında takıldı. Tarama sırası buna göre:
+// iş görenler önce (ilk kaynak erken gelir), hep boş dönen/takılanlar sona ve kısa süreyle.
+let stats = {}
+const statsFile = () => path.join(dir, 'stats.json')
+let statsT = null
+function note(id, ok, hits, ms) {
+  const s = (stats[id] ||= { runs: 0, hits: 0, stuck: 0, ms: 0 })
+  s.runs++
+  if (hits) s.hits++
+  if (!ok) s.stuck++
+  s.ms = Math.round(s.ms ? s.ms * 0.7 + ms * 0.3 : ms)
+  clearTimeout(statsT)
+  statsT = setTimeout(() => fs.promises.writeFile(statsFile(), JSON.stringify(stats)).catch(() => {}), 5000)
+}
+const rate = (id) => { const s = stats[id]; return s ? (s.hits + 0.5) / (s.runs + 1) : 0.5 }
+const chronic = (id) => { const s = stats[id]; return !!s && s.runs >= 3 && s.hits === 0 }
+function ordered(list) {
+  return [...list].sort((a, b) => chronic(a.id) - chronic(b.id) || rate(b.id) - rate(a.id) || (stats[a.id]?.ms || 9e3) - (stats[b.id]?.ms || 9e3))
+}
+
 async function runOne(scraper, args) {
   let code = codeCache.get(scraper.file)
   if (!code) {
@@ -132,7 +155,7 @@ async function runOne(scraper, args) {
       return { ok: false, error: 'dosya yok' }
     }
   }
-  return pool.run({ code, scraperId: scraper.id, args })
+  return pool.run({ code, scraperId: scraper.id, args }, chronic(scraper.id) ? 8000 : PLUGIN_TIMEOUT_MS)
 }
 
 // İş parçacığı havuzu: her eklentide yeni iş parçacığı + cheerio yüklemek zayıf işlemcide (Render)
@@ -167,9 +190,9 @@ const pool = {
     this.workers.push(slot)
     return slot
   },
-  run(payload) {
+  run(payload, timeout = PLUGIN_TIMEOUT_MS) {
     return new Promise((resolve) => {
-      this.queue.push({ id: ++jobSeq, payload, resolve })
+      this.queue.push({ id: ++jobSeq, payload, resolve, timeout })
       this.pump()
     })
   },
@@ -184,7 +207,7 @@ const pool = {
       job.timer = setTimeout(() => {
         // Takılan eklenti: iş parçacığını öldür (kalan fetch'leri de gider), yenisi açılır.
         if (slot.busy === job) { slot.busy = null; job.resolve({ ok: false, error: 'zaman aşımı' }); slot.w.terminate().catch(() => {}) }
-      }, PLUGIN_TIMEOUT_MS)
+      }, job.timeout)
       slot.w.postMessage({ id: job.id, ...job.payload })
     }
   },
@@ -220,7 +243,7 @@ async function getStreams({ tmdbId, kind, season, episode }, onProgress, isCance
   const mediaType = kind === 'tv' ? 'tv' : 'movie'
   const scrapers = state.repos.flatMap((r) => r.scrapers).filter((s) => !state.disabled[s.id] && s.types.includes(mediaType))
   const unique = [...new Map(scrapers.map((s) => [s.id, s])).values()]
-  const queue = [...unique]
+  const queue = ordered(unique)
   let finished = 0
   const total = unique.length
   onProgress({ total, finished, streams: [], scraper: null })
@@ -228,13 +251,16 @@ async function getStreams({ tmdbId, kind, season, episode }, onProgress, isCance
     Array.from({ length: PARALLEL }, async () => {
       while (queue.length && !isCancelled()) {
         const s = queue.shift()
+        const t0 = Date.now()
         const res = await runOne(s, { tmdbId: String(tmdbId), mediaType, season: season ?? null, episode: episode ?? null })
         finished++
         const streams = res.ok ? (res.streams || []).map((x) => normalize(x, s)).filter(Boolean) : []
+        note(s.id, res.ok, streams.length, Date.now() - t0)
         if (!isCancelled()) onProgress({ total, finished, streams, scraper: s.name, error: res.ok ? null : res.error })
       }
     })
   )
 }
 
-module.exports = { init, ensure, installRepo, removeRepo, setEnabled, list, getStreams }
+const getStats = () => stats
+module.exports = { init, ensure, installRepo, removeRepo, setEnabled, list, getStreams, getStats }
