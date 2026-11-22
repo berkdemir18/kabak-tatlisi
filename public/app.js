@@ -64,11 +64,14 @@ const audioPart = (t) => after(t, 'ses:').split('altyazı')[0].split('altyazi')[
 const subPart = (t) => after(t, 'altyazı:') || after(t, 'altyazi:')
 function lang(s) {
   const t = sText(s)
+  // Sunucu kaynağın içine baktı: Türkçe ses kanalı varsa adında yazmasa da dublajlı
+  if (s.trAudio) return 'DUB'
   if (audioPart(t).includes(TR_FLAG) || dubWords.some((w) => t.includes(w))) return 'DUB'
-  if (subPart(t).includes(TR_FLAG) || subWords.some((w) => t.includes(w))) return 'SUB'
+  if (s.trSubIn || subPart(t).includes(TR_FLAG) || subWords.some((w) => t.includes(w))) return 'SUB'
   if (!t.includes('ses:') && turkishWords.some((w) => t.includes(w))) return 'SUB'
   return 'NONE'
 }
+const isTrTrack = (x) => /t[uü]rk|\btur\b|\btr\b/i.test(`${x.lang || ''} ${x.label || x.name || ''}`)
 // Bu cihazda hangi sağlayıcı açıldı / patladı: açılan öne, sürekli patlayan geriye (aynı dil içinde).
 const prov = LS.get('prov', {})
 function provNote(s, ok) {
@@ -80,10 +83,14 @@ function provNote(s, ok) {
 const provBonus = (s) => { const p = prov[s.provider]; return p ? Math.max(-25, Math.min(9, p.ok * 3 - p.bad * 5)) : 0 }
 function score(s) {
   const t = sText(s), l = lang(s)
-  let sc = qTier(t) * 10 + provBonus(s)
+  // süresi tutmayan (yanlış film/bölüm) her zaman en sonda
+  if (s.wrong) return -1e4 + qTier(t)
+  const orig = S.store.settings.audio === 'orig'
+  const dual = (s.audio?.length || 0) > 1
+  let sc = qTier(t) * 10 + provBonus(s) + (s.verified ? 2 : 0)
   if (l !== 'NONE') sc += 1000
-  if (l === 'DUB') sc += 6 + (audioPart(t).trim().startsWith(TR_FLAG) ? 1 : 0)
-  if (l === 'SUB') sc += 3
+  if (l === 'DUB') sc += orig ? (dual ? 5 + (s.trSubIn ? 2 : 0) : 1) : 6 + (audioPart(t).trim().startsWith(TR_FLAG) ? 1 : 0)
+  if (l === 'SUB') sc += orig ? 6 : 3
   return sc
 }
 const sortStreams = (list) => list.map((s, i) => ({ s, i, sc: score(s) })).sort((a, b) => b.sc - a.sc || a.i - b.i).map((x) => x.s)
@@ -784,7 +791,7 @@ class Engine {
       } else if (!mp4 && window.Hls?.isSupported()) {
         const hls = new Hls({ startPosition: start || -1, maxBufferLength: live ? 20 : 45, backBufferLength: 30, enableWorker: true, lowLatencyMode: false, manifestLoadingMaxRetry: 2, levelLoadingMaxRetry: 3, fragLoadingMaxRetry: 4 })
         this.hls = hls
-        hls.on(Hls.Events.MANIFEST_PARSED, () => play())
+        hls.on(Hls.Events.MANIFEST_PARSED, () => { this.onManifest?.(); play() })
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (!data.fatal) return
           if (!settled) return bad(new Error(data.details))
@@ -900,13 +907,17 @@ function renderCtrls() {
     btns.push(h('span', { class: 'sp' }))
     if (c.vod) {
       btns.push(h('button', { class: 'pBtn txt', onclick: srcSheet }, '⇄  Kaynak', P.streams.length ? h('small', {}, ` ${P.idx + 1}/${P.streams.length}`) : null))
-      btns.push(h('button', { class: 'pBtn txt', onclick: subSheet }, '💬  Altyazı'))
+      const al = audioList()
+      if (al.length > 1) { const a = curAudio(); btns.push(h('button', { class: 'pBtn txt', onclick: audioSheet }, '🗣  ', a ? (a.tr ? 'Türkçe' : shortLang(a)) : 'Ses')) }
+      const sb = P.subs[P.subIdx]
+      btns.push(h('button', { class: 'pBtn txt' + (sb ? '' : ' dim'), onclick: subSheet }, '💬  ', sb ? (isTrTrack(sb) ? 'Türkçe' : shortLang(sb)) : 'Altyazı kapalı'))
       if (c.next) btns.push(h('button', { class: 'pBtn txt', onclick: () => c.next() }, '⏭  Sonraki bölüm'))
     }
   }
   btns.push(h('button', { class: 'pBtn', onclick: () => { const v2 = P.eng?.video; if (v2) { v2.muted = !v2.muted; renderCtrls() } } }, v && v.muted ? '🔇' : '🔊'))
   $('#pCtrls').replaceChildren(...btns)
 }
+const shortLang = (x) => { const t = `${x.label || x.name || ''}`.replace(/\s*•.*$/, '').trim(); return t.length > 14 ? t.slice(0, 13) + '…' : t || (x.lang || '?').toUpperCase() }
 function bindVideo(v) {
   const upd = () => {
     if (!P.ctx || P.ctx.live) return
@@ -942,6 +953,7 @@ function newEngine() {
   eng.video.style.setProperty('--sub', S.store.settings.subSize || 100)
   player.style.setProperty('--sub', S.store.settings.subSize || 100)
   eng.onAutoMute = () => { showToast('Ses için 🔊 düğmesine dokun'); renderCtrls() }
+  eng.onManifest = () => { pickAudio(); renderCtrls() }
   bindVideo(eng.video)
   P.eng = eng
   return eng
@@ -1020,7 +1032,7 @@ function chSheet() {
 
 // ---- film / dizi (N kaynakları)
 function playMovie(d, meta) {
-  startVod({ kind: 'movie', id: d.id, imdb: d.imdbId, title: d.name, sub: [d.year, d.genres?.[0]].filter(Boolean).join(' · '), meta, key: progKey('movie', d.id) })
+  startVod({ kind: 'movie', id: d.id, imdb: d.imdbId, title: d.name, sub: [d.year, d.genres?.[0]].filter(Boolean).join(' · '), meta, key: progKey('movie', d.id), runtime: d.runtime || null })
 }
 async function playEpisode(d, meta, s, e) {
   const eps = await cached(`s:${d.id}:${s}`, () => api(`/api/season?id=${d.id}&n=${s}`)).catch(() => [])
@@ -1028,7 +1040,7 @@ async function playEpisode(d, meta, s, e) {
   const nextEp = eps.find((x) => x.number === e + 1 && x.aired)
   const nextSeason = !nextEp && d.seasons.find((x) => x.number === s + 1)
   const next = nextEp ? () => playEpisode(d, meta, s, e + 1) : nextSeason ? () => playEpisode(d, meta, s + 1, 1) : null
-  startVod({ kind: 'tv', id: d.id, imdb: d.imdbId, season: s, episode: e, title: d.name, sub: `S${s} B${e}${ep?.name ? '  ·  ' + ep.name : ''}`, meta, episodeName: ep?.name, key: progKey('tv', d.id, s, e), next })
+  startVod({ kind: 'tv', id: d.id, imdb: d.imdbId, season: s, episode: e, title: d.name, sub: `S${s} B${e}${ep?.name ? '  ·  ' + ep.name : ''}`, meta, episodeName: ep?.name, key: progKey('tv', d.id, s, e), next, runtime: ep?.runtime || d.runtime || null })
 }
 
 function startVod(ctx) {
@@ -1041,6 +1053,7 @@ function startVod(ctx) {
   P.subs = []
   P.subIdx = -1
   P.failed = new Set()
+  P.userSub = false
   center('Kaynaklar aranıyor…', 'BerkStream N eklentileri taranıyor')
   const qs = `kind=${ctx.kind}&id=${ctx.id}${ctx.season ? `&s=${ctx.season}&e=${ctx.episode}` : ''}`
   const es = new EventSource('/api/streams?' + qs)
@@ -1048,12 +1061,13 @@ function startVod(ctx) {
   const t0 = Date.now()
   let total = 0, finished = 0, started = false
   const tryStart = (force) => {
-    if (started || !P.streams.length) return
-    const best = P.streams[0]
+    const bi = nextAuto(0)
+    if (started || bi < 0) return
+    const best = P.streams[bi]
     const top = qTier(sText(best)) >= 3 && lang(best) !== 'NONE'
     if (force || top || Date.now() - t0 > 7000 || (total && finished / total > 0.6)) {
       started = true
-      playIdx(0)
+      playIdx(bi, true)
     }
   }
   es.onmessage = (ev) => {
@@ -1074,6 +1088,7 @@ function startVod(ctx) {
       es.close()
       P.es = null
       if (!P.streams.length) center('Kaynak bulunamadı', 'Bu yapım için eklentiler bir şey döndürmedi', false)
+      else if (!started && nextAuto(0) < 0) center('Doğru kaynak bulunamadı', 'Bulunanların süresi bu yapımla tutmuyor · ⇄ Kaynak menüsünden elle seçebilirsin', false)
       else tryStart(true)
     }
   }
@@ -1084,9 +1099,16 @@ function startVod(ctx) {
   P.saveT = setInterval(saveProgress, 10000)
 }
 
-async function playIdx(i) {
+const playable = (k) => { const x = P.streams[k]; return !!x && !x.wrong && !P.failed.has(x.url) }
+function nextAuto(from) {
+  for (let k = from; k < P.streams.length; k++) if (playable(k)) return k
+  return -1
+}
+const wrongLen = (sec, min) => !!(sec && min && isFinite(sec)) && Math.abs(sec / 60 - min) > Math.max(7, min * 0.2)
+
+async function playIdx(i, auto = false) {
   const ctx = P.ctx
-  if (!ctx || i >= P.streams.length) return center('Hiçbir kaynak açılmadı', 'Kaynak listesinden elle dene', false)
+  if (!ctx || i < 0 || i >= P.streams.length) return center('Hiçbir kaynak açılmadı', 'Kaynak listesinden elle dene', false)
   P.idx = i
   const s = P.streams[i]
   renderCtrls()
@@ -1098,40 +1120,100 @@ async function playIdx(i) {
   try {
     await P.eng.load(s.play, { mp4, start: resumeAt })
     if (P.ctx !== ctx) return
+    // Sunucu süreyi okuyamadıysa (mp4 vb.) burada bakılır: otomatik seçimde yanlış içerik atlanır
+    if (auto && wrongLen(v.duration, ctx.runtime)) {
+      s.wrong = true
+      showToast(`Yanlış içerik (${Math.round(v.duration / 60)} dk), sıradaki kaynak`, 2600)
+      const n = nextAuto(0)
+      if (n >= 0) return playIdx(n, true)
+      P.eng.video.pause()
+      return center('Doğru kaynak bulunamadı', '⇄ Kaynak menüsünden elle seçebilirsin', false)
+    }
     if (resumeAt && Math.abs(v.currentTime - resumeAt) > 5) v.currentTime = resumeAt
     if (resumeAt) showToast(`Kaldığın yerden: ${fmtTime(resumeAt)}`)
     provNote(s, true)
     center(null)
     setupSubs(s)
-    P.eng.onFatal = () => { if (P.ctx === ctx) { showToast('Kaynak düştü, sıradakine geçiliyor'); P.resumeOverride = v.currentTime; playIdx(P.idx + 1) } }
+    P.eng.onFatal = () => { if (P.ctx === ctx) { P.failed.add(s.url); showToast('Kaynak düştü, sıradakine geçiliyor'); P.resumeOverride = v.currentTime; playIdx(nextAuto(0), true) } }
   } catch {
     if (P.ctx !== ctx) return
     P.failed.add(s.url)
     provNote(s, false)
-    if (i + 1 < P.streams.length) playIdx(i + 1)
-    else if (P.es) { center('Kaynaklar aranıyor…', 'Açılan kaynak yok, tarama sürüyor'); const wait = setInterval(() => { if (P.ctx !== ctx) return clearInterval(wait); if (P.streams.length > i + 1) { clearInterval(wait); playIdx(i + 1) } else if (!P.es) { clearInterval(wait); center('Hiçbir kaynak açılmadı', null, false) } }, 1000) }
-    else center('Hiçbir kaynak açılmadı', 'Kaynak listesinden elle dene', false)
+    if (!auto) return center('Bu kaynak açılmadı', '⇄ Kaynak menüsünden başka birini seç', false)
+    const n = nextAuto(0)
+    if (n >= 0) playIdx(n, true)
+    else if (P.es) { center('Kaynaklar aranıyor…', 'Açılan kaynak yok, tarama sürüyor'); const wait = setInterval(() => { if (P.ctx !== ctx) return clearInterval(wait); const k = nextAuto(0); if (k >= 0) { clearInterval(wait); playIdx(k, true) } else if (!P.es) { clearInterval(wait); center('Hiçbir kaynak açılmadı', '⇄ Kaynak menüsünden elle dene', false) } }, 1000) }
+    else center('Hiçbir kaynak açılmadı', '⇄ Kaynak menüsünden elle dene', false)
   }
 }
 
+// ---- ses kanalları (HLS içindeki Türkçe / orijinal)
+function audioList() {
+  const hls = P.eng?.hls
+  return hls ? hls.audioTracks.map((t, i) => ({ i, label: t.name || t.lang || `Ses ${i + 1}`, lang: t.lang || '', tr: isTrTrack({ lang: t.lang, name: t.name }) })) : []
+}
+const curAudio = () => audioList()[P.eng?.hls?.audioTrack ?? -1] || null
+// Kaynakların çoğunda Türkçe + İngilizce ses birlikte geliyor; eskiden hep kaynağın varsayılanı
+// (çoğu zaman İngilizce) çalıyordu. Tercihe göre seçilir.
+function pickAudio() {
+  const list = audioList()
+  if (list.length < 2) return
+  const orig = S.store.settings.audio === 'orig'
+  const k = orig ? list.find((a) => !a.tr) : list.find((a) => a.tr)
+  if (k && P.eng.hls.audioTrack !== k.i) P.eng.hls.audioTrack = k.i
+}
+function audioIsTr() {
+  const a = curAudio()
+  if (a && audioList().some((x) => x.tr)) return a.tr
+  const s = P.streams[P.idx]
+  return !!s && lang(s) === 'DUB' && !(s.audio?.length > 1)
+}
+function setAudio(i) {
+  if (!P.eng?.hls) return
+  P.eng.hls.audioTrack = i
+  if (!P.userSub) setTimeout(autoSub, 300)
+  renderCtrls()
+}
+
+// ---- altyazı: kaynağın içindeki (HLS) + kaynakla gelen + OpenSubtitles
 function setupSubs(s) {
   const v = P.eng.video
   v.querySelectorAll('track').forEach((t) => t.remove())
-  const subs = [...(s.subtitles || []).map((x) => ({ ...x, label: x.label || x.lang })), ...(P.osubs || [])]
-  P.subs = subs
-  const isTr = (x) => /tr|tür|turk/i.test(x.lang + ' ' + x.label)
-  // Dublajda altyazı kapalı, değilse Türkçe açık (N'deki gibi).
+  const hls = P.eng.hls
+  const emb = hls ? hls.subtitleTracks.map((t, i) => ({ type: 'hls', i, name: t.name || '', lang: t.lang || '', label: t.name || t.lang || `Altyazı ${i + 1}`, forced: !!t.forced || /zorunlu|forced/i.test(t.name || '') })) : []
+  const ext = [...(s.subtitles || []).map((x) => ({ ...x, label: x.label || x.lang })), ...(P.osubs || [])].map((x) => ({ type: 'ext', url: x.url, lang: x.lang || '', label: x.label || x.lang || 'Altyazı' }))
+  P.subs = [...emb, ...ext]
+  for (const x of ext) {
+    x.el = h('track', { kind: 'subtitles', src: x.url, srclang: isTrTrack(x) ? 'tr' : 'en', label: x.label })
+    v.append(x.el)
+  }
+  P.userSub = false
+  autoSub()
+}
+// Türkçe sesteyken kapalı; orijinal sesteyken varsayılan dil (Türkçe), zorunlu (forced) olmayan önce.
+function autoSub() {
+  const pref = S.store.settings.subLang || 'tr'
   let pick = -1
-  if (lang(s) !== 'DUB' && S.store.settings.subLang !== 'off') pick = subs.findIndex(isTr)
-  if (pick < 0 && lang(s) === 'NONE' && S.store.settings.subLang === 'en') pick = subs.findIndex((x) => /en|ing/i.test(x.lang + x.label))
-  subs.forEach((x, i) => v.append(h('track', { kind: 'subtitles', src: x.url, srclang: isTr(x) ? 'tr' : 'en', label: x.label })))
+  if (pref !== 'off' && !audioIsTr()) {
+    const want = pref === 'en' ? (x) => /\ben|ing|eng/i.test(`${x.lang} ${x.label}`) && !isTrTrack(x) : isTrTrack
+    pick = P.subs.findIndex((x) => want(x) && !x.forced)
+    if (pick < 0) pick = P.subs.findIndex(want)
+  }
   setSub(pick)
 }
-function setSub(i) {
-  P.subIdx = i
-  const tr = P.eng?.video.textTracks
-  if (!tr) return
-  for (let k = 0; k < tr.length; k++) tr[k].mode = k === i ? 'showing' : 'disabled'
+function setSub(k) {
+  P.subIdx = k
+  const x = P.subs[k]
+  const hls = P.eng?.hls
+  if (!P.eng) return
+  if (hls) {
+    hls.subtitleDisplay = x?.type === 'hls'
+    hls.subtitleTrack = x?.type === 'hls' ? x.i : -1
+  }
+  for (const y of P.subs) if (y.type === 'ext' && y.el?.track) y.el.track.mode = y === x ? 'showing' : 'disabled'
+  // HLS'in kendi açtığı (varsayılan) altyazı izleri de kapansın
+  if (x?.type !== 'hls') for (const t of P.eng.video.textTracks) if (!P.subs.some((y) => y.el?.track === t)) t.mode = 'disabled'
+  renderCtrls()
 }
 function sheet(k, title, items) {
   const sh = $('#sheet')
@@ -1139,23 +1221,80 @@ function sheet(k, title, items) {
   sh.dataset.k = k
   sh.replaceChildren(h('h3', {}, h('span', {}, title), h('button', { class: 'pBtn', onclick: () => (sh.hidden = true) }, '✕')), h('div', { class: 'sheetBody' }, ...items))
 }
+// Kaynak menüsü: süzgeç (dublaj / altyazılı / orijinal), her kaynağın süresi, ses dilleri, gömülü
+// altyazıları; süresi tutmayanlar ayrı bölümde (elle yine seçilebilir).
+let srcFilter = 'all'
+const SRC_F = { all: () => true, dub: (s) => lang(s) === 'DUB', sub: (s) => lang(s) === 'SUB' || s.trSubIn, orig: (s) => lang(s) !== 'DUB' || (s.audio?.length || 0) > 1 }
+function srcRow(s) {
+  const i = P.streams.indexOf(s)
+  const l = lang(s)
+  const names = (arr) => [...new Set(arr.map((a) => (isTrTrack(a) ? 'TR' : (a.lang || a.name || '?').slice(0, 3).toUpperCase())))].join('·')
+  const info = [
+    s.dur ? `${Math.round(s.dur / 60)} dk${s.verified ? ' ✓' : ''}` : null,
+    s.audio?.length > 1 ? `🗣 ${names(s.audio)}` : null,
+    s.subsIn?.length ? `💬 ${names(s.subsIn)}` : null,
+    s.size,
+  ].filter(Boolean).join('  ·  ')
+  return h('button', { class: 'opt' + (i === P.idx ? ' on' : '') + (s.wrong ? ' wrong' : ''), style: P.failed?.has(s.url) ? { opacity: 0.45 } : {}, onclick: () => {
+    $('#sheet').hidden = true
+    const cur = P.streams[P.idx]
+    // yanlış içerikten geçerken o yanlışın dakikası taşınmaz, kayıtlı yerden devam edilir
+    P.resumeOverride = cur && !cur.wrong ? P.eng?.video.currentTime || 0 : null
+    playIdx(i, false)
+  } },
+    h('span', { class: 'tag q' }, qLabel(s)),
+    s.wrong ? h('span', { class: 'tag bad' }, 'YANLIŞ?') : l !== 'NONE' ? h('span', { class: 'tag ' + (l === 'DUB' ? 'dub' : 'sub') }, l === 'DUB' ? 'DUBLAJ' : 'ALTYAZI') : null,
+    h('div', { class: 'ob' }, h('div', { class: 'o1' }, s.provider), h('div', { class: 'o2' }, s.title || ''), info ? h('div', { class: 'o3' }, info) : null))
+}
 function srcSheet() {
-  sheet('src', `Kaynaklar (${P.streams.length})${P.es ? ' · aranıyor' : ''}`, P.streams.map((s, i) => {
-    const l = lang(s)
-    return h('button', { class: 'opt' + (i === P.idx ? ' on' : ''), style: P.failed?.has(s.url) ? { opacity: 0.45 } : {}, onclick: () => { $('#sheet').hidden = true; P.resumeOverride = P.eng?.video.currentTime || 0; playIdx(i) } },
-      h('span', { class: 'tag q' }, qLabel(s)),
-      l !== 'NONE' ? h('span', { class: 'tag ' + (l === 'DUB' ? 'dub' : 'sub') }, l === 'DUB' ? 'DUBLAJ' : 'ALTYAZI') : null,
-      h('div', { class: 'ob' }, h('div', { class: 'o1' }, s.provider), h('div', { class: 'o2' }, [s.title, s.size].filter(Boolean).join(' · '))))
-  }))
+  const good = P.streams.filter((s) => !s.wrong)
+  const bad = P.streams.filter((s) => s.wrong)
+  const chips = h('div', { class: 'fchips' }, ...[['all', 'Tümü'], ['dub', 'Dublaj'], ['sub', 'Altyazılı'], ['orig', 'Orijinal ses']].map(([k, t]) =>
+    h('button', { class: 'chip' + (srcFilter === k ? ' on' : ''), onclick: () => { srcFilter = k; srcSheet() } }, `${t} ${good.filter(SRC_F[k]).length}`)))
+  const shown = good.filter(SRC_F[srcFilter])
+  sheet('src', `Kaynaklar (${good.length})${P.es ? ' · aranıyor' : ''}`, [
+    chips,
+    ...shown.map(srcRow),
+    !shown.length ? h('div', { class: 'empty' }, P.es ? 'Aranıyor…' : 'Bu süzgeçte kaynak yok.') : null,
+    bad.length ? h('div', { class: 'sec', style: { margin: '22px 16px 8px' } }, `Muhtemelen yanlış içerik · süresi tutmuyor (${bad.length})`) : null,
+    ...bad.map(srcRow),
+  ])
+}
+function prefChips(items, cur, onPick) {
+  return h('div', { class: 'fchips' }, ...items.map(([k, t]) => h('button', { class: 'chip' + (cur === k ? ' on' : ''), onclick: () => onPick(k) }, t)))
+}
+function audioSheet() {
+  const list = audioList()
+  const cur = P.eng?.hls?.audioTrack
+  const pref = S.store.settings.audio === 'orig' ? 'orig' : 'tr'
+  sheet('aud', 'Ses', [
+    ...list.map((a) => h('button', { class: 'opt' + (a.i === cur ? ' on' : ''), onclick: () => { setAudio(a.i); audioSheet() } },
+      h('span', { class: 'tag ' + (a.tr ? 'dub' : 'q') }, a.tr ? 'TÜRKÇE' : (a.lang || 'SES').toUpperCase().slice(0, 7)), h('div', { class: 'ob' }, h('div', { class: 'o1' }, a.label)))),
+    h('div', { class: 'sec', style: { margin: '24px 16px 10px' } }, 'Her zaman tercih et'),
+    prefChips([['tr', 'Türkçe dublaj'], ['orig', 'Orijinal ses + altyazı']], pref, async (k) => {
+      S.store.settings = await post('/api/settings', { audio: k })
+      pickAudio()
+      if (!P.userSub) setTimeout(autoSub, 300)
+      const cur2 = P.streams[P.idx]
+      P.streams = sortStreams(P.streams)
+      P.idx = P.streams.indexOf(cur2)
+      audioSheet()
+    }),
+  ])
 }
 function subSheet() {
   const size = S.store.settings.subSize || 100
+  const pick = (i) => { P.userSub = true; setSub(i); subSheet() }
+  const tag = (x) => h('span', { class: 'tag ' + (isTrTrack(x) ? 'sub' : 'q') }, isTrTrack(x) ? 'TR' : (x.lang || '?').toUpperCase().slice(0, 3))
   sheet('sub', 'Altyazı', [
-    h('button', { class: 'opt' + (P.subIdx < 0 ? ' on' : ''), onclick: () => { setSub(-1); subSheet() } }, h('div', { class: 'ob' }, h('div', { class: 'o1' }, 'Kapalı'))),
-    ...P.subs.map((x, i) => h('button', { class: 'opt' + (i === P.subIdx ? ' on' : ''), onclick: () => { setSub(i); subSheet() } }, h('div', { class: 'ob' }, h('div', { class: 'o1' }, x.label || x.lang)))),
+    h('button', { class: 'opt' + (P.subIdx < 0 ? ' on' : ''), onclick: () => pick(-1) }, h('div', { class: 'ob' }, h('div', { class: 'o1' }, 'Kapalı'))),
+    ...P.subs.map((x, i) => h('button', { class: 'opt' + (i === P.subIdx ? ' on' : ''), onclick: () => pick(i) }, tag(x),
+      h('div', { class: 'ob' }, h('div', { class: 'o1' }, x.label), h('div', { class: 'o2' }, x.type === 'hls' ? 'Kaynağın içinde' + (x.forced ? ' · sadece yabancı konuşmalar' : '') : 'Harici dosya')))),
+    !P.subs.length ? h('div', { class: 'empty' }, 'Bu kaynakta altyazı yok.') : null,
+    h('div', { class: 'sec', style: { margin: '24px 16px 10px' } }, 'Varsayılan (Türkçe seste altyazı kendiliğinden kapanır)'),
+    prefChips([['tr', 'Türkçe'], ['en', 'İngilizce'], ['off', 'Kapalı']], S.store.settings.subLang || 'tr', async (k) => { S.store.settings = await post('/api/settings', { subLang: k }); P.userSub = false; autoSub(); subSheet() }),
     h('div', { class: 'sec', style: { margin: '24px 16px 10px' } }, `Boyut: %${size}`),
-    h('div', { style: { display: 'flex', gap: '10px', padding: '0 16px' } },
-      ...[80, 100, 120, 150].map((n) => h('button', { class: 'chip' + (n === size ? ' on' : ''), onclick: async () => { S.store.settings = await post('/api/settings', { subSize: n }); player.style.setProperty('--sub', n); subSheet() } }, '%' + n))),
+    prefChips([80, 100, 120, 150].map((n) => [n, '%' + n]), size, async (n) => { S.store.settings = await post('/api/settings', { subSize: n }); player.style.setProperty('--sub', n); subSheet() }),
   ])
 }
 function saveProgress() {

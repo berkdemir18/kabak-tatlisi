@@ -237,3 +237,11 @@ img { display: block; }
   .ep .es { width: 130px; }
   .sheet { width: 100%; }
 }
+
+/* kaynak / ses / altyazı menüleri */
+.fchips { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 16px 12px; }
+.fchips .chip { height: 44px; padding: 0 16px; }
+.opt .o3 { font-size: 13px; color: var(--mut); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opt.wrong { opacity: .6; }
+.tag.bad { background: #5a1418; color: #ffb3b6; }
+.pBtn.txt.dim { opacity: .7; }

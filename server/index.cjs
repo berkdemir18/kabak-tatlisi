@@ -262,6 +262,7 @@ function getScan(r) {
   const old = scans.get(key)
   if (old && !old.cancelled && (!old.done || Date.now() - old.at < SCAN_TTL)) return old
   const scan = { streams: [], total: 0, finished: 0, done: false, at: Date.now(), subs: new Set(), cancelled: false, pending: new Set() }
+  const expect = expectedMinutes(r)
   scans.set(key, scan)
   const active = [...scans.values()].filter((x) => !x.done && !x.cancelled && x !== scan)
   for (const x of active.slice(0, Math.max(0, active.length - 1))) if (!x.subs.size) x.cancelled = true
@@ -281,7 +282,17 @@ function getScan(r) {
           if (!p.streams?.length) return
           // Kaynak tarayıcıya gitmeden önce yoklanır: Render'ın IP'sini reddeden (428/403/404)
           // kaynaklar listenin başına geçip oynatıcıyı boşuna oyalıyordu.
-          const job = Promise.all(p.streams.map((s) => probe(s).then((ok) => (ok ? s : null)))).then((list) => {
+          const job = Promise.all([expect, ...p.streams.map((s) => probe(s))]).then(([min, ...infos]) => {
+            const list = p.streams.map((s, k) => {
+              const inf = infos[k]
+              if (!inf.ok) return null
+              const x = { ...s, dur: inf.dur || null, audio: inf.audio || [], subsIn: inf.subs || [] }
+              if (x.audio.some((a) => isTrText(a.name) || isTrText(a.lang))) x.trAudio = true
+              if (x.subsIn.some((a) => isTrText(a.name) || isTrText(a.lang))) x.trSubIn = true
+              if (wrongLength(x.dur, min)) x.wrong = true
+              else if (x.dur && min) x.verified = true
+              return x
+            })
             const streams = list.filter(Boolean).map(webStream)
             scan.dropped = (scan.dropped || 0) + list.length - streams.length
             if (!streams.length || scan.cancelled) return
@@ -305,20 +316,76 @@ function getScan(r) {
     })
   return scan
 }
+// Kaynak yoklaması: açılıyor mu + HLS ise süresi, ses kanalları, gömülü altyazıları.
+// Süre beklenenle tutmuyorsa yanlış içerik (Breaking Bad bölümü yerine 123 dk'lık film geliyordu,
+// "TR Dublaj 1080p" yazdığı için de listenin başına geçiyordu).
+const attrOf = (line, k) => new RegExp(`${k}="([^"]*)"`, 'i').exec(line)?.[1] || ''
+const isTrText = (t) => /t[uü]rk|\btur\b|\btr\b/i.test(t || '')
 async function probe(s) {
   const ctrl = new AbortController()
   let timedOut = false
-  const t = setTimeout(() => { timedOut = true; ctrl.abort() }, 6000)
+  const t = setTimeout(() => { timedOut = true; ctrl.abort() }, 8000)
+  const get = (u) => fetch(u, { headers: upstreamHeaders(s.headers), signal: ctrl.signal, redirect: 'follow' })
+  const readText = async (r) => {
+    const reader = r.body?.getReader()
+    if (!reader) return ''
+    const parts = []
+    let n = 0
+    for (;;) {
+      const x = await reader.read()
+      if (x.done) break
+      parts.push(x.value)
+      n += x.value.length
+      if (n > 2e6) { reader.cancel().catch(() => {}); break }
+    }
+    return Buffer.concat(parts).toString('utf8')
+  }
   try {
-    const up = await fetch(s.url, { headers: upstreamHeaders(s.headers), signal: ctrl.signal, redirect: 'follow' })
-    return up.status < 400 || up.status === 405
+    const up = await get(s.url)
+    if (up.status >= 400 && up.status !== 405) return { ok: false }
+    const type = up.headers.get('content-type') || ''
+    if (!/mpegurl|text|octet/i.test(type) && !/\.m3u8?(\?|$)/i.test(s.url)) return { ok: true }
+    let text = await readText(up)
+    if (!text.trimStart().startsWith('#EXTM3U')) return { ok: true }
+    const info = { ok: true, audio: [], subs: [] }
+    if (/#EXT-X-STREAM-INF/.test(text)) {
+      for (const line of text.split(/\r?\n/)) {
+        if (!line.startsWith('#EXT-X-MEDIA:')) continue
+        const tr = { name: attrOf(line, 'NAME'), lang: attrOf(line, 'LANGUAGE') }
+        if (/TYPE=AUDIO/i.test(line)) info.audio.push(tr)
+        else if (/TYPE=SUBTITLES/i.test(line)) info.subs.push(tr)
+      }
+      const variant = text.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#'))
+      if (!variant) return info
+      const r2 = await get(new URL(variant.trim(), up.url || s.url).toString())
+      if (r2.status >= 400) return { ok: false }
+      text = await readText(r2)
+    }
+    let sum = 0
+    for (const m of text.matchAll(/#EXTINF:([\d.]+)/g)) sum += +m[1]
+    if (sum > 60 && /#EXT-X-ENDLIST/.test(text)) info.dur = Math.round(sum)
+    return info
   } catch {
-    return timedOut // yavaş ama belki yaşıyor: ele değil, sona düşer
+    return { ok: timedOut } // yavaş ama belki yaşıyor: elenmez, sona düşer
   } finally {
     clearTimeout(t)
     ctrl.abort()
   }
 }
+// Beklenen süre (dk): filmde TMDB süresi, dizide o bölümün süresi.
+async function expectedMinutes(r) {
+  try {
+    if (r.kind === 'tv' && r.season != null) {
+      const eps = await hub.season(r.tmdbId, r.season)
+      const ep = (eps || []).find((x) => x.number === r.episode)
+      if (ep?.runtime) return ep.runtime
+    }
+    return (await hub.detail(r.kind, r.tmdbId))?.runtime || null
+  } catch {
+    return null
+  }
+}
+const wrongLength = (sec, min) => !!(sec && min) && Math.abs(sec / 60 - min) > Math.max(7, min * 0.2)
 // Tarayici yayini her zaman bizim uzerimizden alir: Referer/Origin basliklari, CORS ve http→https.
 const webStream = (s) => ({ ...s, play: streamUrl(s.url, s.headers), subtitles: (s.subtitles || []).map((x) => ({ ...x, url: subUrl(x.url, s.headers) })) })
 
