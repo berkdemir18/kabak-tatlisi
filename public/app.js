@@ -229,7 +229,7 @@ async function renderGroupsInner(gen) {
         if (t.groups.length === 1) { groups.push({ key: 'grp:' + t.groups[0].name, title: t.title, icon: t.icon, count: t.count, sub: t.groups[0].name }); continue }
         const open = act === 'th:' + t.key || t.groups.some((g) => act === 'grp:' + g.name)
         groups.push({ key: 'th:' + t.key, title: t.title, icon: t.icon, count: t.count, themeKey: t.key, theme: t.key })
-        for (const g of t.groups) groups.push({ key: 'grp:' + g.name, title: g.name, icon: '›', count: g.count, child: true, parent: t.key, open })
+        for (const g of t.groups) groups.push({ key: 'grp:' + g.name, title: g.title || g.name, icon: '›', count: g.count, child: true, parent: t.key, open })
       }
     } else {
       for (const g of data.groups[tab] || []) groups.push({ key: 'grp:' + g.name, title: g.name, icon: '›', count: g.count })
@@ -246,7 +246,9 @@ async function renderGroupsInner(gen) {
   if (active === 'favs' && !groups.find((g) => g.key === 'favs')?.count && !S.group[tab]) active = 'all'
   col.replaceChildren(...groups.map((g) => (g.head ? h('div', { class: 'gHead' }, g.head) : groupBtn(g, g.key === active || (g.isList && g.key === 'list:' + curListId())))))
   // Yönet düğmesi en üstte: 150 grubun altına gömülünce kimse bulamıyordu.
-  if (tab === 'live' || tab === 'movie' || tab === 'series') col.prepend(h('button', { class: 'gAdd top', onclick: openIptv }, '⚙  Listeleri yönet / ekle'))
+  if (tab === 'live' || tab === 'movie' || tab === 'series') col.prepend(h('div', { class: 'gTools' },
+    h('button', { class: 'gAdd', onclick: openIptv }, '⚙  Listeler'),
+    curListId() ? h('button', { class: 'gAdd', onclick: () => openCatEditor(curListId(), tab) }, '✎  Kategoriler') : null))
   col.scrollTop = 0
   if (active) selectGroup(groups.find((g) => g.key === active), true)
 }
@@ -1334,6 +1336,7 @@ document.addEventListener('visibilitychange', () => document.hidden && saveProgr
 // ---------------------------------------------------------------- IPTV listeleri penceresi
 function openIptv() {
   const m = $('#modal')
+  m.onclose = null
   let mode = 'm3u'
   const name = h('input', { placeholder: 'Örn: Ev IPTV' })
   const url = h('input', { placeholder: 'https://…/liste.m3u', inputmode: 'url' })
@@ -1349,6 +1352,7 @@ function openIptv() {
   const drawLists = () => lists.replaceChildren(...S.iptv.map((l) => h('div', { class: 'lstRow' },
     h('div', { class: 'lb' }, h('div', { class: 'l1' }, l.name), h('div', { class: 'l2' }, `${l.counts?.live || 0} kanal · ${l.counts?.movie || 0} film · ${l.counts?.series || 0} dizi${l.epgUrl ? ' · EPG' : ''}${l.error ? ' · ⚠ ' + l.error : ''}`)),
     h('button', { class: 'sm', onclick: async (e) => { e.target.textContent = '…'; const r = await api('/api/iptv/refresh?id=' + l.id).catch((x) => ({ ok: false, error: String(x) })); forgetList(l.id); if (!r.ok) err.textContent = r.error; await reloadIptv(); drawLists(); renderGroups() } }, 'Yenile'),
+    ['live', 'movie', 'series'].some((k) => l.counts?.[k]) ? h('button', { class: 'sm', onclick: () => openCatEditor(l.id, ['live', 'movie', 'series'].find((k) => l.counts?.[k] && k === S.tab) || ['live', 'movie', 'series'].find((k) => l.counts?.[k])) }, 'Kategoriler') : null,
     h('button', { class: 'sm red', onclick: (e) => delList(l, e.currentTarget) }, 'Sil'))))
   // confirm() arabanın tarayıcısında hiç açılmıyor (hep "hayır" dönüyor): silme bu yüzden çalışmıyordu.
   // Onun yerine ikinci dokunuş: "Emin misin?" 4 sn bekler.
@@ -1413,11 +1417,138 @@ function saveBackup() {
   if (S.noBackup) return
   api('/api/backup').then((b) => { if (!b.fresh) LS.set('backup', b) }).catch(() => {})
 }
+// ---------------------------------------------------------------- kategori düzenleyici
+// Kategori ve grup adını değiştir, sil (geri alınabilir), sırala, grubu başka kategoriye taşı, yeni
+// kategori aç. Her değişiklik anında kaydedilir; düzenlemeler listenin içinde durur (yedekle taşınır).
+const twoTap = (label, fn, cls = 'sm red') => {
+  const b = h('button', { class: cls, onclick: () => {
+    if (!b.classList.contains('sure')) {
+      b.classList.add('sure')
+      b.textContent = 'Emin misin?'
+      setTimeout(() => { if (b.isConnected) { b.classList.remove('sure'); b.textContent = label } }, 4000)
+      return
+    }
+    fn()
+  } }, label)
+  return b
+}
+function openCatEditor(id, kname) {
+  const list = S.iptv.find((l) => l.id === id)
+  if (!list) return
+  const kinds = ['live', 'movie', 'series'].filter((k) => list.counts?.[k])
+  if (!kinds.includes(kname)) kname = kinds[0]
+  if (!kname) return
+  const m = $('#modal')
+  const fresh = () => ({ rename: {}, hidden: [], move: {}, custom: [], order: [] })
+  let E = { ...fresh(), ...JSON.parse(JSON.stringify(list.edit?.[kname] || {})) }
+  let data = null
+  let changed = false
+  const body = h('div', { class: 'catList' }, h('div', { class: 'spin' }))
+  const err = h('div', { class: 'err' })
+  const save = async () => {
+    err.textContent = ''
+    const r = await post('/api/iptv/edit', { id, kind: kname, edit: E }).catch(() => null)
+    if (!r) { err.textContent = 'Kaydedilemedi, tekrar dene.'; return }
+    data = r
+    chGroups.set(id, r)
+    list.edit = { ...(list.edit || {}), [kname]: JSON.parse(JSON.stringify(E)) }
+    changed = true
+    saveBackup()
+    draw()
+  }
+  const themes = () => data?.editor?.[kname] || []
+  const nameInput = (cls, value, placeholder, onSet) => h('input', { class: cls, value, placeholder, enterkeyhint: 'done', onkeydown: (e) => { if (e.key === 'Enter') e.target.blur() }, onchange: (e) => onSet(e.target.value.trim()) })
+  function groupRow(g, t, live) {
+    const sel = h('select', { class: 'grpMove', 'aria-label': 'Taşı', onchange: (e) => { E.move[g.name] = e.target.value; save() } },
+      ...live.map((x) => h('option', { value: x.key, selected: x.key === t.key }, `${x.icon} ${x.title}`)))
+    return h('div', { class: 'grpRow' },
+      nameInput('grpName', g.title, g.name, (v) => { if (!v || v === g.name) delete E.rename['g:' + g.name]; else E.rename['g:' + g.name] = v; save() }),
+      h('span', { class: 'gc' }, g.count), sel,
+      twoTap('Sil', () => { E.hidden = [...new Set([...E.hidden, 'g:' + g.name])]; save() }))
+  }
+  function catBox(t, ti, live) {
+    const move = (d) => {
+      const keys = live.map((x) => x.key)
+      const j = ti + d
+      if (j < 0 || j >= keys.length) return
+      ;[keys[ti], keys[j]] = [keys[j], keys[ti]]
+      E.order = keys
+      save()
+    }
+    const groups = t.groups.filter((g) => !g.hidden)
+    return h('div', { class: 'catBox' },
+      h('div', { class: 'catHead' },
+        h('span', { class: 'catIcon' }, t.icon),
+        nameInput('catName', t.title, t.origTitle, (v) => { if (!v || v === t.origTitle) delete E.rename['th:' + t.key]; else E.rename['th:' + t.key] = v; save() }),
+        h('span', { class: 'gc' }, t.count),
+        h('button', { class: 'sm', disabled: ti === 0, onclick: () => move(-1), 'aria-label': 'Yukarı' }, '▲'),
+        h('button', { class: 'sm', disabled: ti === live.length - 1, onclick: () => move(1), 'aria-label': 'Aşağı' }, '▼'),
+        twoTap('Sil', () => {
+          // boş özel kategori tamamen gider; doluysa kanallarıyla birlikte silinenlere düşer
+          if (t.custom && !groups.length) E.custom = E.custom.filter((c) => c.key !== t.key)
+          else E.hidden = [...new Set([...E.hidden, 'th:' + t.key])]
+          save()
+        })),
+      ...groups.map((g) => groupRow(g, t, live)),
+      !groups.length ? h('div', { class: 'catEmpty' }, 'Boş. Başka kategorideki bir grubun "Taşı" menüsünden buraya al.') : null)
+  }
+  function draw() {
+    const all = themes()
+    const live = all.filter((t) => !t.hidden)
+    const dead = all.filter((t) => t.hidden)
+    const deadGroups = live.flatMap((t) => t.groups.filter((g) => g.hidden).map((g) => ({ ...g, t })))
+    const newName = h('input', { class: 'catName', placeholder: 'Yeni kategori adı (örn. Maç kanalları)', enterkeyhint: 'done' })
+    const addCat = () => {
+      const title = newName.value.trim()
+      if (!title) return newName.focus()
+      E.custom = [...E.custom, { key: 'c:' + Math.random().toString(36).slice(2, 8), title, icon: '⭐' }]
+      save()
+    }
+    newName.addEventListener('keydown', (e) => { if (e.key === 'Enter') addCat() })
+    const restore = (key) => { E.hidden = E.hidden.filter((x) => x !== key); save() }
+    body.replaceChildren(
+      ...live.map((t, i) => catBox(t, i, live)),
+      h('div', { class: 'sec' }, 'Yeni kategori'),
+      h('div', { class: 'catHead' }, newName, h('button', { class: 'sm', onclick: addCat }, 'Ekle')),
+      dead.length || deadGroups.length ? h('div', { class: 'sec' }, 'Silinenler') : null,
+      ...dead.map((t) => h('div', { class: 'lstRow gone2' }, h('div', { class: 'lb' }, h('div', { class: 'l1' }, `${t.icon} ${t.title}`), h('div', { class: 'l2' }, `Kategori · ${t.count} kanal`)), h('button', { class: 'sm', onclick: () => restore('th:' + t.key) }, 'Geri al'))),
+      ...deadGroups.map((g) => h('div', { class: 'lstRow gone2' }, h('div', { class: 'lb' }, h('div', { class: 'l1' }, g.title), h('div', { class: 'l2' }, `${g.t.title} içinde · ${g.count}`)), h('button', { class: 'sm', onclick: () => restore('g:' + g.name) }, 'Geri al'))),
+    )
+  }
+  const close = () => {
+    m.hidden = true
+    m.onclose = null
+    if (changed && ['live', 'movie', 'series'].includes(S.tab)) renderGroups()
+  }
+  const KT = { live: 'Canlı TV', movie: 'Film', series: 'Dizi' }
+  m.replaceChildren(h('div', { class: 'box wide' },
+    h('h3', {}, 'Kategorileri düzenle'),
+    h('p', {}, `${list.name} · adın üstüne dokunup değiştir, ▲▼ ile sırala, grubu "Taşı" ile başka kategoriye al. Silinenler aşağıda, geri alınabilir.`),
+    kinds.length > 1 ? h('div', { class: 'seg' }, ...kinds.map((k) => h('button', { class: k === kname ? 'on' : '', onclick: () => { if (changed && ['live', 'movie', 'series'].includes(S.tab)) renderGroups(); openCatEditor(id, k) } }, KT[k]))) : null,
+    body, err,
+    h('div', { class: 'boxBtns' },
+      twoTap('Varsayılana dön', () => { E = fresh(); save() }, 'btn'),
+      h('button', { class: 'btn red', onclick: close }, 'Bitti'))))
+  m.onclose = close
+  m.hidden = false
+  ;(async () => {
+    data = await api('/api/iptv/groups?id=' + id).catch(() => null)
+    if (!data) { body.replaceChildren(h('div', { class: 'empty' }, 'Yüklenemedi.')); return }
+    draw()
+  })()
+}
+
 async function reloadIptv() {
   S.iptv = await api('/api/iptv')
   tabs()
 }
-$('#modal').addEventListener('pointerdown', (e) => { if (e.target.id === 'modal') e.target.hidden = true })
+$('#modal').addEventListener('pointerdown', (e) => {
+  if (e.target.id !== 'modal') return
+  e.target.hidden = true
+  const f = e.target.onclose
+  e.target.onclose = null
+  f?.()
+})
 $('#iptvBtn').onclick = openIptv
 $('#brand').onclick = () => { setTab('n'); S.group.n = undefined; renderGroups() }
 

@@ -293,13 +293,14 @@ function load(list) {
   return p
 }
 
-async function add({ id: keepId, name, url, text, epgUrl, xtream }) {
+async function add({ id: keepId, name, url, text, epgUrl, xtream, edit }) {
   // Yedekten geri yüklenen liste eski kimliğini korur: favoriler/son izlenenler kanala bağlı kalsın.
   const id = /^[a-f0-9]{10}$/.test(keepId || '') && !state.lists.some((l) => l.id === keepId) ? keepId : crypto.randomBytes(5).toString('hex')
   const list = { id, name: name?.trim() || 'IPTV', url: xtream ? xtreamUrl(xtream) : url?.trim() || null, epgUrl: epgUrl?.trim() || null, addedAt: Date.now() }
   if (xtream && !list.epgUrl) list.epgUrl = `${xtream.host.replace(/\/+$/, '')}/xmltv.php?username=${encodeURIComponent(xtream.user)}&password=${encodeURIComponent(xtream.pass)}`
   if (!list.url && !text) throw new Error('Adres ya da liste metni gerekli')
   if (text) list.text = text
+  if (edit && typeof edit === 'object') list.edit = edit
   await load(list)
   state.lists.push(list)
   save()
@@ -333,9 +334,19 @@ async function channels(id) {
 }
 
 // Tür + grup dizini (bir kez kurulur): grup açılınca 115 bin satır baştan taranmasın.
-function index(data, kind, group, theme) {
+// ---------------------------------------------------------------- kullanıcı düzenlemeleri
+// list.edit[live|movie|series] = { rename: {'th:spor': 'Futbol', 'g:SPOR KANALLARI': 'Yerli'},
+//   hidden: ['th:radyo', 'g:KÜRTÇE KANALLAR'], move: {grupAdı: konu}, custom: [{key: 'c:ab12', title, icon}],
+//   order: [konu…] }. Listenin içinde durur: yedekle taşınır, Render diski silinse de kaybolmaz.
+const KN = { l: 'live', m: 'movie', s: 'series' }
+const editOf = (list, kc) => list?.edit?.[KN[kc]] || {}
+const effTheme = (r, e) => e.move?.[r[2]] || r[9]
+const hiddenRow = (r, e, th) => !!e.hidden?.length && (e.hidden.includes('g:' + r[2]) || e.hidden.includes('th:' + th))
+
+function index(data, kind, group, theme, list) {
   data.idx ||= new Map()
-  const key = kind + '\u0000' + (group ?? '') + '\u0000' + (theme ?? '')
+  const e = editOf(list, kind)
+  const key = kind + '\u0000' + (group ?? '') + '\u0000' + (theme ?? '') + '\u0000' + (list?.editVer || 0)
   let a = data.idx.get(key)
   if (!a) {
     const out = []
@@ -343,7 +354,9 @@ function index(data, kind, group, theme) {
     const seen = kind === 's' ? new Set() : null
     for (let i = 0; i < data.rows.length; i++) {
       const r = data.rows[i]
-      if (r[4] !== kind || (group != null && r[2] !== group) || (theme != null && r[9] !== theme)) continue
+      if (r[4] !== kind || (group != null && r[2] !== group)) continue
+      const th = effTheme(r, e)
+      if ((theme != null && th !== theme) || hiddenRow(r, e, th)) continue
       if (seen) { if (seen.has(r[10])) continue; seen.add(r[10]) }
       out.push(i)
     }
@@ -361,6 +374,7 @@ const slim = (data, i, asShow) => { const r = data.rows[i]; return r ? [i, asSho
 async function rows(id, { kind, group, theme, q, from = 0, n = 200, idx }) {
   const data = await channels(id)
   if (!data) return null
+  const list = state.lists.find((l) => l.id === id)
   if (idx) return { total: idx.length, rows: idx.map((i) => slim(data, i)).filter(Boolean) }
   if (q) {
     const needle = q.toLocaleLowerCase('tr')
@@ -369,17 +383,89 @@ async function rows(id, { kind, group, theme, q, from = 0, n = 200, idx }) {
     for (let i = 0; i < data.rows.length && out.length < 300; i++) {
       const r = data.rows[i]
       if ((!kind || r[4] === kind) && r[0].toLocaleLowerCase('tr').includes(needle)) {
+        const e = editOf(list, r[4])
+        if (hiddenRow(r, e, effTheme(r, e))) continue
         if (r[4] === 's') { if (seenShow.has(r[10])) continue; seenShow.add(r[10]) }
         out.push(slim(data, i, r[4] === 's'))
       }
     }
     return { total: out.length, rows: out }
   }
-  const a = index(data, kind, group || null, theme || null)
+  const a = index(data, kind, group || null, theme || null, list)
   const end = Math.min(a.length, from + Math.min(n, 500))
   const out = []
   for (let k = from; k < end; k++) out.push(slim(data, a[k], kind === 's'))
   return { total: a.length, from, rows: out }
+}
+
+// Düzenlemeler uygulanmış kategori özeti: görünenler (grup sütunu) + hepsi (düzenleyici, silinenler dahil).
+function editedSummary(data, list, kname) {
+  const kc = { live: 'l', movie: 'm', series: 's' }[kname]
+  const e = editOf(list, kc)
+  const ck = kname + ':' + (list?.editVer || 0)
+  data.sum ||= {}
+  if (data.sum[ck]) return data.sum[ck]
+  const acc = new Map()
+  for (const r of data.rows) {
+    if (r[4] !== kc) continue
+    const th = effTheme(r, e)
+    let t = acc.get(th)
+    if (!t) acc.set(th, (t = { groups: new Map(), seen: kc === 's' ? new Set() : null }))
+    if (t.seen) { if (t.seen.has(r[10])) continue; t.seen.add(r[10]) }
+    t.groups.set(r[2], (t.groups.get(r[2]) || 0) + 1)
+  }
+  const custom = e.custom || []
+  for (const c of custom) if (!acc.has(c.key)) acc.set(c.key, { groups: new Map() })
+  const order = [...(e.order || []), ...(kname === 'live' ? LIVE_ORDER : VOD_ORDER), ...custom.map((c) => c.key)]
+  const pos = (k) => { const i = order.indexOf(k); return i < 0 ? 999 : i }
+  const inf = kname === 'live' ? LIVE_INFO : VOD_INFO
+  const hid = e.hidden || []
+  const all = [...acc].sort((a, b) => pos(a[0]) - pos(b[0])).map(([key, t]) => {
+    const cu = custom.find((c) => c.key === key)
+    const base = cu || inf[key] || { icon: '📁', title: key }
+    const groups = [...t.groups].map(([name, count]) => ({ name, title: e.rename?.['g:' + name] || name, count, hidden: hid.includes('g:' + name) }))
+    return { key, icon: base.icon || '📁', title: e.rename?.['th:' + key] || base.title, origTitle: base.title, custom: !!cu, hidden: hid.includes('th:' + key), count: groups.reduce((a, g) => a + g.count, 0), groups }
+  })
+  const visible = all
+    .filter((t) => !t.hidden)
+    .map((t) => { const groups = t.groups.filter((g) => !g.hidden); return { ...t, groups, count: groups.reduce((a, g) => a + g.count, 0) } })
+    .filter((t) => t.groups.length)
+  const out = { visible, all }
+  for (const k of Object.keys(data.sum)) if (k.startsWith(kname + ':')) delete data.sum[k]
+  data.sum[ck] = out
+  return out
+}
+async function summaries(id) {
+  const data = await channels(id)
+  if (!data) return null
+  const list = state.lists.find((l) => l.id === id)
+  const themes = {}
+  const editor = {}
+  for (const k of Object.keys(data.groups)) {
+    const x = editedSummary(data, list, k)
+    themes[k] = x.visible
+    editor[k] = x.all
+  }
+  return { groups: data.groups, themes, editor, at: data.at }
+}
+// Düzenleyiciden gelen değişiklik (bir tür için tamamı): şekli süzülür, kayıt sürümü artar.
+function setEdit(id, kname, edit) {
+  const list = state.lists.find((l) => l.id === id)
+  if (!list || !['live', 'movie', 'series'].includes(kname)) return false
+  const str = (v, n = 80) => String(v ?? '').slice(0, n)
+  const obj = (o, max) => Object.fromEntries(Object.entries(o && typeof o === 'object' ? o : {}).slice(0, max).map(([k, v]) => [str(k, 300), str(v)]).filter(([, v]) => v))
+  const custom = (Array.isArray(edit?.custom) ? edit.custom : []).filter((c) => /^c:[a-z0-9]{1,12}$/.test(c?.key || '')).slice(0, 40).map((c) => ({ key: c.key, title: str(c.title, 40) || 'Yeni kategori', icon: str(c.icon, 8) || '📁' }))
+  const clean = {
+    rename: obj(edit?.rename, 500),
+    hidden: (Array.isArray(edit?.hidden) ? edit.hidden : []).map((x) => str(x, 300)).slice(0, 1000),
+    move: obj(edit?.move, 1000),
+    custom,
+    order: (Array.isArray(edit?.order) ? edit.order : []).map((x) => str(x, 40)).slice(0, 80),
+  }
+  list.edit = { ...(list.edit || {}), [kname]: clean }
+  list.editVer = (list.editVer || 0) + 1
+  save()
+  return true
 }
 
 // Bir dizinin bütün bölümleri (sezon/bölüm sırasıyla).
@@ -500,6 +586,6 @@ async function epg(id, tvgIds) {
 }
 
 // Yedek için listelerin tanımı (şifreli adres dahil; yalnız girişli kullanıcıya).
-const exportDefs = () => state.lists.map((l) => ({ id: l.id, name: l.name, url: l.url, text: l.text, epgUrl: l.epgUrl }))
+const exportDefs = () => state.lists.map((l) => ({ id: l.id, name: l.name, url: l.url, text: l.text, epgUrl: l.epgUrl, edit: l.edit }))
 
-module.exports = { exportDefs, init, add, remove, lists, channels, rows, episodes, refresh, channel, epg }
+module.exports = { exportDefs, init, add, remove, lists, channels, rows, episodes, summaries, setEdit, refresh, channel, epg }

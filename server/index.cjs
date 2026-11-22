@@ -498,9 +498,11 @@ async function api(req, res, u) {
   }
   // Sadece gruplar; kanallar sayfa sayfa /api/iptv/rows'tan (115 bin satırı tek JSON'da yollamak
   // hem sunucuyu çökertiyor hem arabanın tarayıcısını kilitliyordu).
-  if (p === '/api/iptv/groups') {
-    const d = await iptv.channels(q.get('id'))
-    return json(req, res, d ? { groups: d.groups, themes: d.themes, at: d.at } : null)
+  if (p === '/api/iptv/groups') return json(req, res, await iptv.summaries(q.get('id')))
+  if (p === '/api/iptv/edit' && m === 'POST') {
+    const b = await body(req)
+    if (!iptv.setEdit(b.id, b.kind, b.edit)) return json(req, res, null)
+    return json(req, res, await iptv.summaries(b.id))
   }
   if (p === '/api/iptv/rows') {
     const idx = q.get('idx') ? q.get('idx').split(',').map(Number).filter((n) => n >= 0).slice(0, 500) : null

@@ -245,3 +245,25 @@ img { display: block; }
 .opt.wrong { opacity: .6; }
 .tag.bad { background: #5a1418; color: #ffb3b6; }
 .pBtn.txt.dim { opacity: .7; }
+
+/* kategori düzenleyici */
+.gTools { display: flex; gap: 8px; margin: 4px 14px 10px; }
+.gTools .gAdd { margin: 0; flex: 1; width: auto; height: 52px; font-size: 15px; }
+.box.wide { width: min(900px, 100%); }
+.catList { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.catBox { background: var(--p2); border-radius: 16px; padding: 10px 12px; }
+.catHead { display: flex; align-items: center; gap: 8px; }
+.catIcon { font-size: 22px; width: 32px; text-align: center; flex: none; }
+.box input.catName { flex: 1; width: auto; min-width: 0; height: 50px; font-weight: 750; font-size: 18px; }
+.grpRow { display: flex; align-items: center; gap: 8px; padding: 6px 0 2px 40px; }
+.box input.grpName { flex: 1; width: auto; min-width: 0; height: 46px; font-size: 16px; }
+select.grpMove { height: 46px; max-width: 200px; border-radius: 12px; border: 1px solid #2a2f37; background: #0a0b0d; color: #fff; padding: 0 10px; font-size: 15px; }
+.catEmpty { padding: 8px 0 4px 40px; color: var(--mut); font-size: 14px; }
+.sm[disabled] { opacity: .3; }
+.sm.sure, .btn.sure { background: var(--acc); color: #fff; }
+.lstRow.gone2 { opacity: .75; }
+.catBox .gc, .catHead .gc { color: var(--dim); font-size: 14px; min-width: 28px; text-align: right; }
+@media (max-width: 900px) {
+  .grpRow { flex-wrap: wrap; padding-left: 10px; }
+  select.grpMove { max-width: none; flex: 1; }
+}
