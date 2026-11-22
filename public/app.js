@@ -30,6 +30,8 @@ const fmtTime = (s) => {
   return hh ? `${hh}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`
 }
 const hhmm = (t) => new Date(t).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
+// TMDB görselini gösterildiği boyda iste: 48 px'lik satır afişine w342 indirmek arabanın işlemcisini boğuyor.
+const img = (u, size) => (u ? String(u).replace(/\/t\/p\/(w\d+|original)\//, `/t/p/${size}/`) : u)
 const LS = {
   get(k, d) { try { const v = localStorage.getItem('bs_' + k); return v == null ? d : JSON.parse(v) } catch { return d } },
   set(k, v) { try { localStorage.setItem('bs_' + k, JSON.stringify(v)) } catch {} },
@@ -139,12 +141,27 @@ function curListId() {
   return (ok.find((l) => l.id === want) || ok[0])?.id || null
 }
 
+// Her çizim bir kuşak numarası alır: yavaş gelen eski cevap (önceki sekme/grup) yenisinin
+// üstüne yazamaz. "Menüye bastım geçmedi" hatasının sebebi buydu.
+let groupsGen = 0
 async function renderGroups() {
+  const gen = ++groupsGen
+  try {
+    await renderGroupsInner(gen)
+  } catch (e) {
+    if (gen !== groupsGen) return
+    $('#groups').replaceChildren(h('div', { class: 'empty' }, 'Yüklenemedi.'), h('button', { class: 'gAdd', onclick: renderGroups }, '↻  Tekrar dene'))
+  }
+}
+async function renderGroupsInner(gen) {
   const col = $('#groups')
   const tab = S.tab
   let groups = []
+  const waiting = tab === 'n' ? !S.home : ['live', 'movie', 'series'].includes(tab) && curListId() && !chData.has(curListId())
+  if (waiting) col.replaceChildren(h('div', { class: 'spin' }))
   if (tab === 'n') {
     if (!S.home) S.home = await cached('home', () => api('/api/home'))
+    if (gen !== groupsGen) return
     const cont = Object.values(S.store.progress).filter((p) => p.meta && p.dur && p.pos / p.dur < 0.95)
     groups.push({ head: 'BerkStream N' })
     if (cont.length) groups.push({ key: 'cont', title: 'İzlemeye devam et', icon: '▶', count: cont.length })
@@ -163,11 +180,13 @@ async function renderGroups() {
     if (!id) {
       col.replaceChildren(h('div', { class: 'empty' }, 'Henüz IPTV listesi yok.'), h('button', { class: 'gAdd', onclick: openIptv }, '+ M3U / Xtream ekle'))
       curGroups = []
+      selGen++
       showList('none', 'IPTV', [])
       $('#preview').replaceChildren(h('div', { class: 'pvEmpty' }, h('div', {}, h('b', {}, '📡'), 'M3U linkini ya da Xtream bilgilerini ekle,', h('br'), 'kanallar TiviMate gibi burada dizilsin.')))
       return
     }
     const data = await loadChannels(id)
+    if (gen !== groupsGen) return
     groups.push({ head: tab === 'live' ? 'Kanallar' : 'Kategoriler' })
     if (tab === 'live') {
       groups.push({ key: 'favs', title: 'Favoriler', icon: '★', count: S.store.favs.filter((k) => k.startsWith(id + ':')).length })
@@ -186,23 +205,26 @@ async function renderGroups() {
   if (!active || !groups.some((g) => g.key && g.key === active && !g.isList)) active = (groups.find((g) => g.ranked) || groups.find((g) => g.key && !g.isList))?.key
   if (active === 'favs' && !groups.find((g) => g.key === 'favs')?.count && !S.group[tab]) active = 'all'
   col.replaceChildren(...groups.map((g) => (g.head ? h('div', { class: 'gHead' }, g.head) : groupBtn(g, g.key === active || (g.isList && g.key === 'list:' + curListId())))))
-  if (tab === 'live' || tab === 'movie' || tab === 'series') col.append(h('button', { class: 'gAdd', onclick: openIptv }, '⚙  Listeleri yönet'))
-  else if (tab === 'n') col.append(h('button', { class: 'gAdd', onclick: openIptv }, '📡  IPTV listesi ekle'))
+  // Yönet düğmesi en üstte: 150 grubun altına gömülünce kimse bulamıyordu.
+  if (tab === 'live' || tab === 'movie' || tab === 'series') col.prepend(h('button', { class: 'gAdd top', onclick: openIptv }, '⚙  Listeleri yönet / ekle'))
+  col.scrollTop = 0
   if (active) selectGroup(groups.find((g) => g.key === active), true)
 }
 const titleCase = (s) => s.toLocaleLowerCase('tr').replace(/(^|[\s•(])(\p{L})/gu, (m, a, b) => a + b.toLocaleUpperCase('tr')).replace(/\bTv\b/g, 'TV').replace(/\bHbo\b/, 'HBO').replace(/İlk 10/i, 'İlk 10')
 
+let selGen = 0
 async function selectGroup(g, initial) {
+  const gen = ++selGen
   try {
-    await selectGroupInner(g, initial)
+    await selectGroupInner(g, initial, gen)
   } catch (e) {
-    if (!g || g.isList) return
+    if (gen !== selGen || !g || g.isList) return
     $('#listHead').replaceChildren(h('h2', {}, g.title))
     $('#vspace').style.height = '0px'
     $('#vspace').replaceChildren(h('div', { class: 'empty' }, 'Yüklenemedi.', h('br'), h('button', { class: 'btn', style: { marginTop: '16px' }, onclick: () => selectGroup(g) }, '↻  Tekrar dene')))
   }
 }
-async function selectGroupInner(g, initial) {
+async function selectGroupInner(g, initial, gen) {
   if (!g) return
   if (g.isList) {
     LS.set('iptvList', g.key.slice(5))
@@ -212,26 +234,27 @@ async function selectGroupInner(g, initial) {
   LS.set('group', S.group)
   for (const b of $('#groups').querySelectorAll('.g')) if (!b.dataset.key?.startsWith('list:')) b.classList.toggle('on', b.dataset.key === g.key)
   const k = g.key
-  if (!initial && !['search', 'searchTv'].includes(k)) {
+  if (!['search', 'searchTv'].includes(k)) {
     $('#listHead').replaceChildren(h('h2', {}, g.title))
     $('#vspace').style.height = '0px'
     $('#vspace').replaceChildren(h('div', { class: 'spin' }))
   }
   if (k === 'cont') {
     const items = Object.entries(S.store.progress).filter(([, p]) => p.meta && p.dur && p.pos / p.dur < 0.95).sort((a, b) => b[1].updatedAt - a[1].updatedAt).map(([key, p]) => ({ ...p.meta, _prog: p, _key: key }))
-    return showList('meta', g.title, items, { initial })
+    return showList('meta', g.title, items, { initial, gen })
   }
-  if (k === 'mylist') return showList('meta', 'Listem', S.store.list, { initial })
-  if (k.startsWith('shelf:')) return showShelf(k.slice(6), g.title, g.ranked, initial)
+  if (k === 'mylist') return showList('meta', 'Listem', S.store.list, { initial, gen })
+  if (k.startsWith('shelf:')) return showShelf(k.slice(6), g.title, g.ranked, initial, gen)
   if (k.startsWith('plat:')) {
     const p = await cached('plat:' + k, () => api('/api/platform?key=' + k.slice(5)))
     const items = []
-    const all = await Promise.all(p.shelves.slice(0, 2).map((sh) => cached('shelf:' + sh.id + ':1', () => api(`/api/shelf?id=${sh.id}&page=1`)).catch(() => [])))
+    // dört raf aynı anda (eskiden ikişer ikişer sırayla bekleniyordu)
+    const shelf = (sh) => cached('shelf:' + sh.id + ':1', () => api(`/api/shelf?id=${sh.id}&page=1`)).catch(() => [])
+    const [all, rest] = await Promise.all([Promise.all(p.shelves.slice(0, 2).map(shelf)), Promise.all(p.shelves.slice(3, 5).map(shelf))])
     all.forEach((arr) => items.push(...arr.slice(0, 10)))
-    const rest = await Promise.all(p.shelves.slice(3, 5).map((sh) => cached('shelf:' + sh.id + ':1', () => api(`/api/shelf?id=${sh.id}&page=1`)).catch(() => [])))
     rest.forEach((arr) => items.push(...arr))
     const seen = new Set()
-    return showList('meta', p.title, items.filter((x) => { const kk = x.kind + x.id; if (seen.has(kk)) return false; seen.add(kk); return true }), { initial, rankUntil: 0 })
+    return showList('meta', p.title, items.filter((x) => { const kk = x.kind + x.id; if (seen.has(kk)) return false; seen.add(kk); return true }), { initial, gen, rankUntil: 0 })
   }
   if (k === 'search') return showSearch(initial)
   if (k === 'searchTv') return showTvSearch()
@@ -242,7 +265,7 @@ async function selectGroupInner(g, initial) {
   if (k === 'favs') idx = S.store.favs.filter((f) => f.startsWith(id + ':')).map((f) => +f.split(':')[1])
   else if (k === 'recent') idx = S.store.recentCh.filter((f) => f.startsWith(id + ':')).map((f) => +f.split(':')[1])
   else if (k.startsWith('grp:')) { const name = k.slice(4); idx = idx.filter((i) => data.ch[i][2] === name) }
-  showList('ch', g.title, idx, { initial, listId: id, emptyText: k === 'favs' ? 'Kanala dokun, sağdan ☆ Favori.' : k === 'recent' ? 'Henüz kanal izlemedin.' : 'Burası boş.' })
+  showList('ch', g.title, idx, { initial, gen, listId: id, emptyText: k === 'favs' ? 'Kanala dokun, sağdan ☆ Favori.' : k === 'recent' ? 'Henüz kanal izlemedin.' : 'Burası boş.' })
 }
 
 // ---------------------------------------------------------------- IPTV veri
@@ -290,6 +313,7 @@ const nowProg = (arr) => { const n = Date.now(); return arr?.find((p) => p.s <= 
 S.listKind = 'none'
 let vOpts = {}
 function showList(kind, title, items, opts = {}) {
+  if (opts.gen != null && opts.gen !== selGen) return
   S.listKind = kind
   S.items = items
   vOpts = opts
@@ -317,7 +341,10 @@ function showList(kind, title, items, opts = {}) {
   vRender(true)
   select(S.sel, false)
 }
-const rowH = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue('--row')) || 84
+// Satır yüksekliği bir kez okunur: her kaydırma karesinde getComputedStyle pahalı.
+let ROW = 0
+const rowH = () => ROW || (ROW = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--row')) || 84)
+window.addEventListener('resize', () => { ROW = 0; if (S.items.length) { $('#vspace').style.height = S.items.length * rowH() + 'px'; vRender(true) } })
 const rendered = new Map()
 function vRender(force) {
   const vl = $('#vlist'), sp = $('#vspace'), rh = rowH()
@@ -335,7 +362,8 @@ function vRender(force) {
   // sonsuz kaydırma (raflar)
   if (vOpts.more && to >= S.items.length - 4) vOpts.more()
 }
-$('#vlist').addEventListener('scroll', () => requestAnimationFrame(() => vRender(false)), { passive: true })
+let vRaf = 0
+$('#vlist').addEventListener('scroll', () => { if (!vRaf) vRaf = requestAnimationFrame(() => { vRaf = 0; vRender(false) }) }, { passive: true })
 
 function rowEl(i) {
   const it = S.items[i]
@@ -345,7 +373,7 @@ function rowEl(i) {
     const rank = vOpts.ranked && i < 10
     return h('button', { class: 'row' + (on ? ' on' : ''), onclick: () => tapRow(i) },
       h('span', { class: 'rn' + (rank ? ' big' : '') }, i + 1),
-      h('div', { class: 'rp', style: { backgroundImage: `url(${it.poster})` } }),
+      h('div', { class: 'rp', style: { backgroundImage: `url(${img(it.poster, 'w154')})` } }),
       h('div', { class: 'rb' },
         h('div', { class: 'rt' }, it.name),
         h('div', { class: 'rs' }, [it.year, it.rating && '★ ' + it.rating, it.kind === 'tv' ? 'Dizi' : 'Film', it._prog?.season ? `S${it._prog.season} B${it._prog.episode}` : null].filter(Boolean).join('  ·  ')),
@@ -386,16 +414,18 @@ function select(i, user) {
   else if (S.listKind === 'ch') renderPreviewCh(S.items[i], false, user)
 }
 
-async function showShelf(id, title, ranked, initial) {
+async function showShelf(id, title, ranked, initial, gen) {
   let page = 1, loading = false, done = false
   const items = await cached(`shelf:${id}:1`, () => api(`/api/shelf?id=${id}&page=1`)).catch(() => [])
   showList('meta', title, items, {
-    initial, ranked,
+    initial, ranked, gen,
     more: async () => {
       if (loading || done || ranked) return
       loading = true
       const next = await cached(`shelf:${id}:${page + 1}`, () => api(`/api/shelf?id=${id}&page=${page + 1}`)).catch(() => [])
       loading = false
+      // bu arada başka gruba geçildiyse sonraki sayfa o listeye eklenmesin
+      if (gen !== selGen) return
       if (!next.length) { done = true; return }
       page++
       const seen = new Set(S.items.map((x) => x.kind + x.id))
@@ -416,7 +446,7 @@ function showSearch() {
     LS.set('q', q)
     if (q.length < 2) return showList('meta', '', [], { keepHead: true, emptyText: 'En az 2 harf yaz.' })
     const r = await cached('q:' + q, () => api('/api/search?q=' + encodeURIComponent(q))).catch(() => [])
-    if (inp.value.trim() === q) showList('meta', '', r, { keepHead: true, emptyText: 'Bulunamadı.' })
+    if (inp.isConnected && inp.value.trim() === q) showList('meta', '', r, { keepHead: true, emptyText: 'Bulunamadı.' })
   }
   inp.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 350) })
   run()
@@ -443,19 +473,22 @@ async function showTvSearch() {
 
 // ---------------------------------------------------------------- önizleme: film / dizi
 let pvToken = 0
+let prefetchT = null
 async function renderPreviewMeta(m) {
   const tok = ++pvToken
   stopMini()
   const pv = $('#preview')
-  const hero = h('div', { class: 'pvHero', style: { backgroundImage: m.backdrop ? `url(${m.backdrop})` : 'none' } })
+  const hero = h('div', { class: 'pvHero', style: { backgroundImage: m.backdrop ? `url(${img(m.backdrop, 'w780')})` : 'none' } })
   const body = h('div', { class: 'pvBody' }, h('h1', { class: 'pvName' }, m.name), h('div', { class: 'pvMeta' }, m.year, m.rating && h('span', { class: 'star' }, '★ ' + m.rating), m.kind === 'tv' ? 'Dizi' : 'Film'), h('p', { class: 'pvOv' }, m.overview || ''))
   pv.replaceChildren(hero, body)
   pv.scrollTop = 0
   const d = await cached(`d:${m.kind}:${m.id}`, () => api(`/api/detail?kind=${m.kind}&id=${m.id}`)).catch(() => null)
   if (tok !== pvToken || !d) return
-  // detay açılınca kaynak taraması arkada başlar (N'deki gibi): Oynat'a basınca hazır.
-  if (m.kind === 'movie') api(`/api/streams?kind=movie&id=${m.id}&prefetch=1`).catch(() => {})
-  if (d.backdrop) hero.style.backgroundImage = `url(${d.backdrop})`
+  // Kaynak taraması arkada başlar ama sadece filmde 2,5 sn durursan: eskiden listede gezinirken
+  // her dokunuş 81 eklentiyi çalıştırıp sunucuyu (ve menüleri) kilitliyordu.
+  clearTimeout(prefetchT)
+  if (m.kind === 'movie') prefetchT = setTimeout(() => { if (tok === pvToken && player.hidden) api(`/api/streams?kind=movie&id=${m.id}&prefetch=1`).catch(() => {}) }, 2500)
+  if (d.backdrop) hero.style.backgroundImage = `url(${img(d.backdrop, 'w780')})`
   const inList = S.store.list.some((x) => x.kind === m.kind && x.id === m.id)
   const meta = { id: d.id, kind: d.kind, name: d.name, poster: d.poster || m.poster, backdrop: d.backdrop, overview: d.overview, year: d.year, rating: d.rating }
   const prog = m.kind === 'movie' ? S.store.progress[`movie:${m.id}`] : lastEpisode(m.id)
@@ -999,8 +1032,31 @@ function openIptv() {
   const lists = h('div', { class: 'lst' })
   const drawLists = () => lists.replaceChildren(...S.iptv.map((l) => h('div', { class: 'lstRow' },
     h('div', { class: 'lb' }, h('div', { class: 'l1' }, l.name), h('div', { class: 'l2' }, `${l.counts?.live || 0} kanal · ${l.counts?.movie || 0} film · ${l.counts?.series || 0} dizi${l.epgUrl ? ' · EPG' : ''}${l.error ? ' · ⚠ ' + l.error : ''}`)),
-    h('button', { class: 'sm', onclick: async (e) => { e.target.textContent = '…'; const r = await api('/api/iptv/refresh?id=' + l.id); chData.delete(l.id); if (!r.ok) err.textContent = r.error; await reloadIptv(); drawLists() } }, 'Yenile'),
-    h('button', { class: 'sm red', onclick: async () => { if (!confirm(`"${l.name}" silinsin mi?`)) return; S.iptv = await api('/api/iptv?id=' + l.id, { method: 'DELETE' }); chData.delete(l.id); drawLists(); tabs(); renderGroups() } }, 'Sil'))))
+    h('button', { class: 'sm', onclick: async (e) => { e.target.textContent = '…'; const r = await api('/api/iptv/refresh?id=' + l.id).catch((x) => ({ ok: false, error: String(x) })); chData.delete(l.id); if (!r.ok) err.textContent = r.error; await reloadIptv(); drawLists(); renderGroups() } }, 'Yenile'),
+    h('button', { class: 'sm red', onclick: (e) => delList(l, e.currentTarget) }, 'Sil'))))
+  // confirm() arabanın tarayıcısında hiç açılmıyor (hep "hayır" dönüyor): silme bu yüzden çalışmıyordu.
+  // Onun yerine ikinci dokunuş: "Emin misin?" 4 sn bekler.
+  const delList = async (l, btn) => {
+    if (!btn.classList.contains('sure')) {
+      btn.classList.add('sure')
+      btn.textContent = 'Emin misin?'
+      setTimeout(() => { if (btn.isConnected) { btn.classList.remove('sure'); btn.textContent = 'Sil' } }, 4000)
+      return
+    }
+    btn.closest('.lstRow')?.classList.add('gone')
+    try {
+      S.iptv = await api('/api/iptv?id=' + l.id, { method: 'DELETE' })
+    } catch (x) {
+      err.textContent = 'Silinemedi: ' + x
+      return drawLists()
+    }
+    chData.delete(l.id)
+    if (LS.get('iptvList', null) === l.id) LS.set('iptvList', null)
+    saveBackup()
+    drawLists()
+    tabs()
+    renderGroups()
+  }
   const drawSeg = () => {
     seg.replaceChildren(...[['m3u', 'M3U linki'], ['xtream', 'Xtream'], ['text', 'Metin yapıştır']].map(([k, t]) => h('button', { class: mode === k ? 'on' : '', onclick: () => { mode = k; drawSeg() } }, t)))
     fields.replaceChildren(
@@ -1010,6 +1066,8 @@ function openIptv() {
   }
   drawSeg()
   drawLists()
+  // açılırken sunucudan tazele (yedekten geri yükleme o sırada sürüyor olabilir)
+  reloadIptv().then(() => m.hidden || drawLists()).catch(() => {})
   const addBtn = h('button', { class: 'btn red', onclick: async () => {
     err.textContent = ''
     addBtn.disabled = true
@@ -1024,6 +1082,7 @@ function openIptv() {
     if (!r.ok) return (err.textContent = r.error)
     await reloadIptv()
     LS.set('iptvList', r.list.id)
+    saveBackup()
     drawLists()
     m.hidden = true
     setTab(r.list.counts?.live ? 'live' : r.list.counts?.movie ? 'movie' : 'series')
@@ -1034,11 +1093,16 @@ function openIptv() {
     h('div', { class: 'boxBtns' }, h('button', { class: 'btn', onclick: () => (m.hidden = true) }, 'Kapat'), addBtn)))
   m.hidden = false
 }
+function saveBackup() {
+  if (S.noBackup) return
+  api('/api/backup').then((b) => { if (!b.fresh) LS.set('backup', b) }).catch(() => {})
+}
 async function reloadIptv() {
   S.iptv = await api('/api/iptv')
   tabs()
 }
 $('#modal').addEventListener('pointerdown', (e) => { if (e.target.id === 'modal') e.target.hidden = true })
+$('#iptvBtn').onclick = openIptv
 $('#brand').onclick = () => { setTab('n'); S.group.n = undefined; renderGroups() }
 
 // ---------------------------------------------------------------- açılış
@@ -1049,19 +1113,22 @@ $('#brand').onclick = () => { setTab('n'); S.group.n = undefined; renderGroups()
   S.store = { favs: [], recentCh: [], ...store }
   S.iptv = lists
   // Sunucu boş açıldıysa (Render diski silinir) bu cihazdaki yedekten geri yükle.
+  // Eskiden "sunucu boş mu" diye bakılıyordu: tek listeni silince sunucu boş görünüyor, yedek silineni
+  // geri getiriyordu. Artık sunucu diskin gerçekten silindiğini (_fresh) kendisi söylüyor.
   const bk = LS.get('backup', null)
-  const serverEmpty = !S.store.list.length && !Object.keys(S.store.progress).length && !(S.store.favs || []).length && !lists.length
-  if (serverEmpty && bk && (bk.store?.list?.length || Object.keys(bk.store?.progress || {}).length || bk.iptv?.length)) {
+  const hasBk = bk && (bk.store?.list?.length || Object.keys(bk.store?.progress || {}).length || bk.iptv?.length)
+  if (store._fresh && hasBk) {
     $('#preview').replaceChildren(h('div', { class: 'pvEmpty' }, h('div', {}, h('div', { class: 'spin' }), 'Yedekten geri yükleniyor…')))
-    await post('/api/restore', bk).catch(() => {})
+    const ok = await post('/api/restore', bk).catch(() => null)
     const [s2, l2] = await Promise.all([api('/api/store'), api('/api/iptv').catch(() => [])])
     S.store = { favs: [], recentCh: [], ...s2 }
     S.iptv = l2
+    // geri yükleme patladıysa iyi yedeğin üstüne boşu yazma
+    if (!ok?.ok) S.noBackup = true
   }
-  const backup = () => api('/api/backup').then((b) => { if (b.store.list.length || Object.keys(b.store.progress).length || b.iptv.length) LS.set('backup', b) }).catch(() => {})
-  backup()
-  setInterval(backup, 60e3)
-  window.addEventListener('pagehide', backup)
+  saveBackup()
+  setInterval(saveBackup, 60e3)
+  window.addEventListener('pagehide', saveBackup)
   tabs()
   renderGroups()
 })()

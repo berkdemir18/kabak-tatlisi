@@ -35,6 +35,9 @@ img { display: block; }
 .tab { height: 52px; padding: 0 22px; border-radius: 26px; color: var(--mut); font-weight: 650; font-size: 18px; white-space: nowrap; display: flex; align-items: center; gap: 9px; }
 .tab.on { background: #fff; color: #000; }
 .tab:not(.on):active { background: var(--p3); }
+.topBtn { height: 52px; padding: 0 20px; border-radius: 26px; background: var(--p3); color: #d6d9de; font-weight: 650; font-size: 17px; white-space: nowrap; flex: none; }
+.topBtn:active { background: #2a303a; }
+.gAdd.top { margin: 4px 18px 10px; }
 .clock { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; color: #d6d6d6; min-width: 76px; text-align: right; }
 
 /* ---------- 3 sütun ---------- */
@@ -196,6 +199,8 @@ img { display: block; }
 .lstRow .l2 { color: var(--mut); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sm { height: 48px; padding: 0 16px; border-radius: 12px; background: var(--p3); font-weight: 650; font-size: 16px; }
 .sm.red { background: #5a1418; color: #ffb3b6; }
+.sm.red.sure { background: var(--acc); color: #fff; }
+.lstRow.gone { opacity: .4; pointer-events: none; }
 
 /* dar ekran (telefon): tek sütun akış */
 @media (max-width: 900px) {
@@ -203,6 +208,7 @@ img { display: block; }
   .top { height: 64px; padding: 0 12px; gap: 10px; }
   .brand span, .clock { display: none; }
   .tab { height: 44px; padding: 0 16px; font-size: 16px; }
+  .topBtn { height: 44px; padding: 0 14px; font-size: 15px; }
   .cols { display: block; overflow-y: auto; }
   .groups { display: flex; overflow-x: auto; padding: 8px 10px; gap: 6px; border: 0; border-bottom: 1px solid var(--line); scrollbar-width: none; }
   .groups::-webkit-scrollbar { display: none; }

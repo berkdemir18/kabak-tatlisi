@@ -46,8 +46,12 @@ setInterval(() => plugins.ensure().catch(() => {}), 3600e3)
 const storeFile = path.join(DATA, 'store.json')
 let store = { list: [], progress: {}, settings: { subLang: 'tr', subSize: 100 }, favs: [], recentCh: [] }
 store = { ...store, ...readJson(storeFile) }
+// Disk gerçekten silinmiş mi (Render uyuyup kalkınca): tarayıcı yedeği sadece o zaman geri yüklenir.
+// "Sunucu boş" ölçütü yetmiyordu: tek IPTV listeni silince de boş görünüyordu, yedek onu geri getiriyordu.
+let fresh = !fs.existsSync(storeFile) && !iptv.lists().length
 let saveT = null
 const saveStore = () => {
+  fresh = false
   clearTimeout(saveT)
   saveT = setTimeout(() => hub.safeWrite(storeFile, JSON.stringify(store)), 300)
 }
@@ -298,7 +302,7 @@ async function api(req, res, u) {
   if (p === '/api/search') return json(req, res, await hub.search(q.get('q') || ''))
   if (p === '/api/streams') return handleStreams(req, res, q)
   if (p === '/api/subs') return json(req, res, await openSubtitles({ imdbId: q.get('imdb'), kind: q.get('kind'), season: q.get('s'), episode: q.get('e') }))
-  if (p === '/api/store') return json(req, res, store)
+  if (p === '/api/store') return json(req, res, { ...store, _fresh: fresh })
   if (p === '/api/list' && m === 'POST') {
     const item = await body(req)
     const k = `${item.kind}:${item.id}`
@@ -337,9 +341,10 @@ async function api(req, res, u) {
     return json(req, res, store.recentCh)
   }
   // Yedek: sunucunun diski silinirse (Render) tarayıcıdaki kopyadan geri yüklenir.
-  if (p === '/api/backup') return json(req, res, { store, iptv: iptv.exportDefs() })
+  if (p === '/api/backup') return json(req, res, { fresh, store, iptv: iptv.exportDefs() })
   if (p === '/api/restore' && m === 'POST') {
     const b = await body(req)
+    if (!fresh) return json(req, res, { ok: true, restoredStore: false, added: 0 })
     const empty = !store.list.length && !Object.keys(store.progress).length && !store.favs.length
     if (empty && b.store) {
       store = { ...store, ...b.store }
@@ -347,18 +352,27 @@ async function api(req, res, u) {
     }
     let added = 0
     if (!iptv.lists().length && Array.isArray(b.iptv)) for (const d of b.iptv) { try { await iptv.add(d); added++ } catch {} }
+    fresh = false
+    saveStore()
     return json(req, res, { ok: true, restoredStore: empty && !!b.store, added })
   }
   // IPTV
   if (p === '/api/iptv' && m === 'GET') return json(req, res, iptv.lists())
   if (p === '/api/iptv' && m === 'POST') {
     try {
-      return json(req, res, { ok: true, list: await iptv.add(await body(req)) })
+      const { id, ...def } = await body(req)
+      fresh = false
+      return json(req, res, { ok: true, list: await iptv.add(def) })
     } catch (e) {
       return json(req, res, { ok: false, error: String(e?.message || e) })
     }
   }
-  if (p === '/api/iptv' && m === 'DELETE') return json(req, res, (iptv.remove(q.get('id')), iptv.lists()))
+  if (p === '/api/iptv' && m === 'DELETE') {
+    fresh = false
+    iptv.remove(q.get('id'))
+    saveStore()
+    return json(req, res, iptv.lists())
+  }
   if (p === '/api/iptv/refresh') {
     try {
       return json(req, res, { ok: true, list: await iptv.refresh(q.get('id')) })
@@ -441,3 +455,7 @@ const server = http.createServer(async (req, res) => {
   }
 })
 server.listen(PORT, '0.0.0.0', () => console.log(`BerkStream N Tesla: http://localhost:${PORT}`))
+
+// Render Free 15 dk istek gelmezse servisi uyutur: uyanmak 30-60 sn sürüyor ve disk (raf önbelleği,
+// IPTV listeleri) siliniyor. Kendi dış adresine 10 dk'da bir dokunup uyanık kalır.
+if (process.env.RENDER_EXTERNAL_URL) setInterval(() => fetch(process.env.RENDER_EXTERNAL_URL + '/healthz', { signal: AbortSignal.timeout(15000) }).catch(() => {}), 10 * 60e3)

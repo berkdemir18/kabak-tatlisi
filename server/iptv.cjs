@@ -130,8 +130,9 @@ async function load(list) {
   return data
 }
 
-async function add({ name, url, text, epgUrl, xtream }) {
-  const id = crypto.randomBytes(5).toString('hex')
+async function add({ id: keepId, name, url, text, epgUrl, xtream }) {
+  // Yedekten geri yüklenen liste eski kimliğini korur: favoriler/son izlenenler kanala bağlı kalsın.
+  const id = /^[a-f0-9]{10}$/.test(keepId || '') && !state.lists.some((l) => l.id === keepId) ? keepId : crypto.randomBytes(5).toString('hex')
   const list = { id, name: name?.trim() || 'IPTV', url: xtream ? xtreamUrl(xtream) : url?.trim() || null, epgUrl: epgUrl?.trim() || null, addedAt: Date.now() }
   if (xtream && !list.epgUrl) list.epgUrl = `${xtream.host.replace(/\/+$/, '')}/xmltv.php?username=${encodeURIComponent(xtream.user)}&password=${encodeURIComponent(xtream.pass)}`
   if (!list.url && !text) throw new Error('Adres ya da liste metni gerekli')
@@ -269,6 +270,6 @@ async function epg(id, tvgIds) {
 }
 
 // Yedek için listelerin tanımı (şifreli adres dahil; yalnız girişli kullanıcıya).
-const exportDefs = () => state.lists.map((l) => ({ name: l.name, url: l.url, text: l.text, epgUrl: l.epgUrl }))
+const exportDefs = () => state.lists.map((l) => ({ id: l.id, name: l.name, url: l.url, text: l.text, epgUrl: l.epgUrl }))
 
 module.exports = { exportDefs, init, add, remove, lists, channels, refresh, channel, epg }
