@@ -921,6 +921,8 @@ function renderCtrls() {
 }
 const shortLang = (x) => { const t = `${x.label || x.name || ''}`.replace(/\s*•.*$/, '').trim(); return t.length > 14 ? t.slice(0, 13) + '…' : t || (x.lang || '?').toUpperCase() }
 function bindVideo(v) {
+  v.textTracks.addEventListener('change', () => { if (P.eng?.video === v) enforceSub() })
+  v.textTracks.addEventListener('addtrack', () => { if (P.eng?.video === v) setTimeout(enforceSub, 0) })
   const upd = () => {
     if (!P.ctx || P.ctx.live) return
     const d = v.duration || 0
@@ -1220,10 +1222,21 @@ function setSub(k) {
     hls.subtitleDisplay = x?.type === 'hls'
     hls.subtitleTrack = x?.type === 'hls' ? x.i : -1
   }
-  for (const y of P.subs) if (y.type === 'ext' && y.el?.track) y.el.track.mode = y === x ? 'showing' : 'disabled'
-  // HLS'in kendi açtığı (varsayılan) altyazı izleri de kapansın
-  if (x?.type !== 'hls') for (const t of P.eng.video.textTracks) if (!P.subs.some((y) => y.el?.track === t)) t.mode = 'disabled'
+  enforceSub()
   renderCtrls()
+}
+// Tarayıcı / hls.js izleri sonradan kendi açabiliyor (iki Türkçe altyazı üst üste çıkıyordu):
+// her değişimde seçim yeniden zorlanır.
+function enforceSub() {
+  const v = P.eng?.video
+  if (!v) return
+  const x = P.subs[P.subIdx]
+  for (const t of v.textTracks) {
+    const mine = P.subs.find((y) => y.el?.track === t)
+    if (x?.type === 'hls' && !mine) continue // hls kendi izini yönetir
+    const want = mine && mine === x ? 'showing' : 'disabled'
+    if (t.mode !== want) t.mode = want
+  }
 }
 function sheet(k, title, items) {
   const sh = $('#sheet')
