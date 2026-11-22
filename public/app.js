@@ -1415,7 +1415,11 @@ function openIptv() {
 }
 function saveBackup() {
   if (S.noBackup) return
-  api('/api/backup').then((b) => { if (!b.fresh) LS.set('backup', b) }).catch(() => {})
+  // Sunucunun silinmiş (boş) yarısı yedeğin dolu yarısının üstüne yazılmaz.
+  api('/api/backup').then((b) => {
+    const old = LS.get('backup', null) || {}
+    LS.set('backup', { store: b.freshStore ? old.store || b.store : b.store, iptv: b.freshIptv ? old.iptv || b.iptv : b.iptv })
+  }).catch(() => {})
 }
 // ---------------------------------------------------------------- kategori düzenleyici
 // Kategori ve grup adını değiştir, sil (geri alınabilir), sırala, grubu başka kategoriye taşı, yeni
@@ -1561,10 +1565,11 @@ $('#brand').onclick = () => { setTab('n'); S.group.n = undefined; renderGroups()
   S.iptv = lists
   // Sunucu boş açıldıysa (Render diski silinir) bu cihazdaki yedekten geri yükle.
   // Eskiden "sunucu boş mu" diye bakılıyordu: tek listeni silince sunucu boş görünüyor, yedek silineni
-  // geri getiriyordu. Artık sunucu diskin gerçekten silindiğini (_fresh) kendisi söylüyor.
+  // geri getiriyordu. Artık sunucu diskin gerçekten silindiğini kendisi söylüyor (kayıtlar ve IPTV ayrı).
   const bk = LS.get('backup', null)
-  const hasBk = bk && (bk.store?.list?.length || Object.keys(bk.store?.progress || {}).length || bk.iptv?.length)
-  if (store._fresh && hasBk) {
+  const bkStore = bk && (bk.store?.list?.length || Object.keys(bk.store?.progress || {}).length)
+  const bkIptv = bk?.iptv?.length
+  if ((store._freshStore && bkStore) || (store._freshIptv && bkIptv)) {
     const ok = await post('/api/restore', bk).catch(() => null)
     S.store = { favs: [], recentCh: [], ...(await api('/api/store').catch(() => S.store)) }
     // geri yükleme patladıysa iyi yedeğin üstüne boşu yazma

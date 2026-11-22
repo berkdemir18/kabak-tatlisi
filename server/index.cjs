@@ -58,12 +58,14 @@ setInterval(() => plugins.ensure().catch(() => {}), 3600e3)
 const storeFile = path.join(DATA, 'store.json')
 let store = { list: [], progress: {}, settings: { subLang: 'tr', subSize: 100 }, favs: [], recentCh: [] }
 store = { ...store, ...readJson(storeFile) }
-// Disk gerçekten silinmiş mi (Render uyuyup kalkınca): tarayıcı yedeği sadece o zaman geri yüklenir.
-// "Sunucu boş" ölçütü yetmiyordu: tek IPTV listeni silince de boş görünüyordu, yedek onu geri getiriyordu.
-let fresh = !fs.existsSync(storeFile) && !iptv.lists().length
+// Disk gerçekten silinmiş mi (Render uyuyup kalkınca / deploy): tarayıcı yedeği sadece o zaman geri
+// yüklenir. İki ayrı bayrak: eskiden tek bayrak vardı ve bir ayar değişikliği bile onu kapatıp IPTV
+// listesinin yedekten gelmesini engelliyordu.
+let freshStore = !fs.existsSync(storeFile)
+let freshIptv = !iptv.lists().length && !fs.existsSync(path.join(DATA, 'iptv', 'iptv.json'))
 let saveT = null
 const saveStore = () => {
-  fresh = false
+  freshStore = false
   clearTimeout(saveT)
   saveT = setTimeout(() => hub.safeWrite(storeFile, JSON.stringify(store)), 300)
 }
@@ -417,7 +419,7 @@ async function api(req, res, u) {
   if (p === '/api/search') return json(req, res, await hub.search(q.get('q') || ''))
   if (p === '/api/streams') return handleStreams(req, res, q)
   if (p === '/api/subs') return json(req, res, await openSubtitles({ imdbId: q.get('imdb'), kind: q.get('kind'), season: q.get('s'), episode: q.get('e') }))
-  if (p === '/api/store') return json(req, res, { ...store, _fresh: fresh })
+  if (p === '/api/store') return json(req, res, { ...store, _freshStore: freshStore, _freshIptv: freshIptv })
   if (p === '/api/list' && m === 'POST') {
     const item = await body(req)
     const k = `${item.kind}:${item.id}`
@@ -456,37 +458,36 @@ async function api(req, res, u) {
     return json(req, res, store.recentCh)
   }
   // Yedek: sunucunun diski silinirse (Render) tarayıcıdaki kopyadan geri yüklenir.
-  if (p === '/api/backup') return json(req, res, { fresh, store, iptv: iptv.exportDefs() })
+  if (p === '/api/backup') return json(req, res, { freshStore, freshIptv, store, iptv: iptv.exportDefs() })
   if (p === '/api/restore' && m === 'POST') {
     const b = await body(req)
-    if (!fresh) return json(req, res, { ok: true, restoredStore: false, added: 0 })
-    const empty = !store.list.length && !Object.keys(store.progress).length && !store.favs.length
-    if (empty && b.store) {
-      store = { ...store, ...b.store }
+    let restoredStore = false
+    if (freshStore && b.store) {
+      // disk silindikten sonra yapılan küçük yazmalar (ayar, kaldığın yer) yedeğin üstüne eklenir
+      store = { ...store, ...b.store, progress: { ...(b.store.progress || {}), ...store.progress }, settings: { ...(b.store.settings || {}), ...store.settings } }
+      restoredStore = true
       saveStore()
     }
     // IPTV listeleri arkada iner (büyük liste dakika sürebilir): sayfa beklemeden açılır.
-    const defs = !iptv.lists().length && Array.isArray(b.iptv) ? b.iptv : []
+    const defs = freshIptv && !iptv.lists().length && Array.isArray(b.iptv) ? b.iptv : []
+    if (defs.length) freshIptv = false
     ;(async () => { for (const d of defs) await iptv.add(d).catch(() => {}) })()
-    fresh = false
-    saveStore()
-    return json(req, res, { ok: true, restoredStore: empty && !!b.store, pendingIptv: defs.length })
+    return json(req, res, { ok: true, restoredStore, pendingIptv: defs.length })
   }
   // IPTV
   if (p === '/api/iptv' && m === 'GET') return json(req, res, iptv.lists())
   if (p === '/api/iptv' && m === 'POST') {
     try {
       const { id, ...def } = await body(req)
-      fresh = false
+      freshIptv = false
       return json(req, res, { ok: true, list: await iptv.add(def) })
     } catch (e) {
       return json(req, res, { ok: false, error: String(e?.message || e) })
     }
   }
   if (p === '/api/iptv' && m === 'DELETE') {
-    fresh = false
+    freshIptv = false
     iptv.remove(q.get('id'))
-    saveStore()
     return json(req, res, iptv.lists())
   }
   if (p === '/api/iptv/refresh') {
@@ -502,6 +503,7 @@ async function api(req, res, u) {
   if (p === '/api/iptv/edit' && m === 'POST') {
     const b = await body(req)
     if (!iptv.setEdit(b.id, b.kind, b.edit)) return json(req, res, null)
+    freshIptv = false
     return json(req, res, await iptv.summaries(b.id))
   }
   if (p === '/api/iptv/rows') {
