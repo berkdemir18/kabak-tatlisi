@@ -792,6 +792,8 @@ class Engine {
         const hls = new Hls({ startPosition: start || -1, maxBufferLength: live ? 20 : 45, backBufferLength: 30, enableWorker: true, lowLatencyMode: false, manifestLoadingMaxRetry: 2, levelLoadingMaxRetry: 3, fragLoadingMaxRetry: 4 })
         this.hls = hls
         hls.on(Hls.Events.MANIFEST_PARSED, () => { this.onManifest?.(); play() })
+        // ses kanalları liste ayrıştırıldıktan sonra gelebiliyor: tercih o zaman da uygulanır
+        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => this.onManifest?.())
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (!data.fatal) return
           if (!settled) return bad(new Error(data.details))
@@ -1180,9 +1182,17 @@ function setupSubs(s) {
   const v = P.eng.video
   v.querySelectorAll('track').forEach((t) => t.remove())
   const hls = P.eng.hls
-  const emb = hls ? hls.subtitleTracks.map((t, i) => ({ type: 'hls', i, name: t.name || '', lang: t.lang || '', label: t.name || t.lang || `Altyazı ${i + 1}`, forced: !!t.forced || /zorunlu|forced/i.test(t.name || '') })) : []
-  const ext = [...(s.subtitles || []).map((x) => ({ ...x, label: x.label || x.lang })), ...(P.osubs || [])].map((x) => ({ type: 'ext', url: x.url, lang: x.lang || '', label: x.label || x.lang || 'Altyazı' }))
-  P.subs = [...emb, ...ext]
+  const seenUrl = new Set()
+  const ext = [...(s.subtitles || []).map((x) => ({ ...x, label: x.label || x.lang })), ...(P.osubs || [])]
+    .filter((x) => x.url && !seenUrl.has(x.url) && seenUrl.add(x.url))
+    .map((x) => ({ type: 'ext', url: x.url, lang: x.lang || '', label: x.label || x.lang || 'Altyazı' }))
+  // Harici dosya (bizim üzerimizden VTT) her tarayıcıda çalışıyor; kaynağın içindeki aynı dil
+  // gösterilmiyordu. Gömülü olan sadece o dilde harici yoksa listede kalır.
+  const langKey = (x) => (isTrTrack(x) ? 'tr' : /eng|english|ingiliz|\ben\b/i.test(`${x.lang} ${x.label}`) ? 'en' : `${x.lang || x.label}`.toLowerCase())
+  const extLangs = new Set(ext.map(langKey))
+  const emb = (hls ? hls.subtitleTracks.map((t, i) => ({ type: 'hls', i, name: t.name || '', lang: t.lang || '', label: t.name || t.lang || `Altyazı ${i + 1}`, forced: !!t.forced || /zorunlu|forced/i.test(t.name || '') })) : [])
+    .filter((x) => x.forced || !extLangs.has(langKey(x)))
+  P.subs = [...ext, ...emb]
   for (const x of ext) {
     x.el = h('track', { kind: 'subtitles', src: x.url, srclang: isTrTrack(x) ? 'tr' : 'en', label: x.label })
     v.append(x.el)
